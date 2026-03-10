@@ -1,5 +1,6 @@
 import prompt from 'prompt-sync';
 import { ChatCompletionMessageParam } from "openai/resources/chat/completions.mjs";
+import { HandOutcome } from './services/session-tracker.ts';
 
 import { sleep } from './helpers/bot-helper.ts';
 import { LocalPokerEngine } from "./services/local-poker-engine.ts";
@@ -63,7 +64,15 @@ export class Bot {
 
     public async run() {
         await this.openGame();
+                await this.local_poker_engine.sessionTracker.init();
         await this.enterTableInProgress();
+
+                process.on("SIGINT", async () => {
+                        await this.local_poker_engine.sessionTracker.finaliseSession();
+                        this.local_poker_engine.printSessionSummary();
+                        process.exit(0);
+                });
+
         // retrieve initial num players
         await this.updateNumPlayers();
         //TODO: implement loop until STOP SIGNAL (perhaps from UI?)
@@ -76,6 +85,7 @@ export class Bot {
             await this.playOneHand();
             this.hand_history = [];
             this.table.nextHand();
+                        this.local_poker_engine.printSessionSummary();
         }
     }
 
@@ -109,7 +119,7 @@ export class Bot {
     
             console.log(`Attempting to enter table with name: ${name} and stack size: ${stack_size}.`);
             const code = logResponse(await this.puppeteer_service.sendEnterTableRequest(name, Number(stack_size)), this.debug_mode);
-    
+            this.local_poker_engine.setStartingStack(convertToBBs(Number(stack_size), this.game.getBigBlind()));
             if (code === "success") {
                 break;
             }
@@ -159,12 +169,12 @@ export class Bot {
                     }
                     console.log("Performing bot's turn.");
 
-                    // get hand and stack size
-                 const pot_size = await this.getPotSize();
-const hand = await this.getHand();
-const stack_size = await this.getStackSize();
+                          // get hand and stack size
+                          const pot_size = await this.getPotSize();
+                          const hand = await this.getHand();
+                          const stack_size = await this.getStackSize();
 
-console.log("Hero Hand:", hand.join(" "));
+                          console.log("Hero Hand:", hand.join(" "));
                     this.table.setPot(convertToBBs(pot_size, this.game.getBigBlind()));
                     await this.updateHero(hand, convertToBBs(stack_size, this.game.getBigBlind()));
 
@@ -183,7 +193,36 @@ console.log("Hero Hand:", hand.join(" "));
                     console.log("Waiting for bot's turn to end");
                     logResponse(await this.puppeteer_service.waitForBotTurnEnd(), this.debug_mode);
                 } else if (data.includes("winner")) {
-                    console.log("Detected winner in hand.")
+                    console.log("Detected winner in hand.");
+
+                    try {
+                        const endStack = await this.puppeteer_service.getStackSize();
+                        if (endStack.code === "success") {
+                            const endStackBB = convertToBBs(endStack.data as number, this.game.getBigBlind());
+                            const hero = this.game.getHero();
+                            const startStackBB = hero ? hero.getStackSize() : 0;
+                            const wonBB = endStackBB - startStackBB;
+                            const trace = this.local_poker_engine.getLastTrace();
+
+                            const outcome: HandOutcome = {
+                                handId: `hand-${Date.now()}`,
+                                street: trace?.street ?? "preflop",
+                                heroPosition: trace?.position ?? "unknown",
+                                handKey: trace?.handKey ?? "??",
+                                action: trace?.chosenAction ?? "unknown",
+                                sizeBB: trace?.chosenSizeBB ?? 0,
+                                potBB: this.table.getPot(),
+                                wonBB,
+                                showdown: wonBB !== 0,
+                                villainVPIP: undefined,
+                                villainPFR: undefined,
+                            };
+                            this.local_poker_engine.recordHandOutcome(outcome);
+                        }
+                    } catch (err) {
+                        console.log("Failed to record hand outcome:", err);
+                    }
+
                     break;
                 }
             }
@@ -407,7 +446,7 @@ private async queryBotAction(
 
     try {
         const ACTION_SYNC_DELAY_MS = 100;
-await sleep(ACTION_SYNC_DELAY_MS);
+        await sleep(ACTION_SYNC_DELAY_MS);
 
         const ai_response = await this.ai_service.query(query, this.hand_history);
         this.hand_history = ai_response.prev_messages;
@@ -489,10 +528,24 @@ await sleep(ACTION_SYNC_DELAY_MS);
         console.log("Bot Action:", bot_action.action_str);
         let bet_size = convertToValue(bot_action.bet_size_in_BBs, this.game.getBigBlind());
         console.log("Bot Action (BBs):", bot_action);
-console.log("Big Blind:", this.game.getBigBlind());
-console.log("Converted Bet Size:", bet_size);
-console.log("Current Pot (BB):", this.table.getPot());
-console.log("Current Street:", this.table.getStreet());
+        console.log("Big Blind:", this.game.getBigBlind());
+        console.log("Converted Bet Size:", bet_size);
+        console.log("Current Pot (BB):", this.table.getPot());
+        console.log("Current Street:", this.table.getStreet());
+
+        const trace = this.local_poker_engine.getLastTrace();
+        if (trace) {
+            console.log(
+                `[Engine] ${trace.street.toUpperCase()} | ${trace.position} | ` +
+                `${trace.handKey} -> ${trace.chosenAction}` +
+                `${trace.chosenSizeBB > 0 ? ` ${trace.chosenSizeBB.toFixed(1)}bb` : ""}` +
+                ` [${trace.profile}]` +
+                ` eq:${trace.equity?.toFixed(2) ?? "?"}` +
+                ` spr:${trace.spr?.toFixed(1) ?? "?"}` +
+                ` | ${trace.reasons.join(", ")}`
+            );
+        }
+
         switch (bot_action.action_str) {
             case "bet":
                 console.log("Bet Size:", convertToBBs(bet_size, this.game.getBigBlind()));
@@ -523,3 +576,7 @@ console.log("Current Street:", this.table.getStreet());
         }
     }
 }
+
+
+
+//VERSION 1.0.0
