@@ -74,6 +74,10 @@ export class Table {
         this.players_in_pot -= 1;
     } 
 
+    public getIdToName(): Map<string, string> {
+    return this.id_to_name;
+}
+
     public getPot(): number {
         return this.pot_size_in_BBs;
     }

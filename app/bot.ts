@@ -2,6 +2,7 @@ import prompt from 'prompt-sync';
 import { ChatCompletionMessageParam } from "openai/resources/chat/completions.mjs";
 
 import { sleep } from './helpers/bot-helper.ts';
+import { LocalPokerEngine } from "./services/local-poker-engine.ts";
 
 import { AIService, BotAction, defaultCheckAction, defaultFoldAction } from './interfaces/ai-client-interfaces.ts';
 import { ProcessedLogs } from './interfaces/log-processing-interfaces.ts';
@@ -29,6 +30,7 @@ export class Bot {
     private game_id: string;
     private debug_mode: DebugMode;
     private query_retries: number;
+    private local_poker_engine: LocalPokerEngine;
 
     private first_created: string;
     private hand_history: ChatCompletionMessageParam | any;
@@ -49,6 +51,7 @@ export class Bot {
         this.ai_service = ai_service;
         this.player_service = player_service;
         this.puppeteer_service = puppeteer_service;
+        this.local_poker_engine = new LocalPokerEngine();
 
         this.game_id = game_id;
         this.debug_mode = debug_mode;
@@ -157,10 +160,11 @@ export class Bot {
                     console.log("Performing bot's turn.");
 
                     // get hand and stack size
-                    const pot_size = await this.getPotSize();
-                    const hand = await this.getHand();
-                    const stack_size = await this.getStackSize();
+                 const pot_size = await this.getPotSize();
+const hand = await this.getHand();
+const stack_size = await this.getStackSize();
 
+console.log("Hero Hand:", hand.join(" "));
                     this.table.setPot(convertToBBs(pot_size, this.game.getBigBlind()));
                     await this.updateHero(hand, convertToBBs(stack_size, this.game.getBigBlind()));
 
@@ -342,155 +346,22 @@ private getCurrentBoard(): string[] {
 
 
 private async getLocalFallbackAction(): Promise<BotAction> {
-    const hero = this.game.getHero();
+    const action = this.local_poker_engine.decide(this.game, this.table);
 
-    if (!hero) {
-        if (await this.isValidBotAction(defaultCheckAction)) return defaultCheckAction;
-        return defaultFoldAction;
+    if (await this.isValidBotAction(action)) {
+        return action;
     }
 
-    const hand = hero.getHand() ?? [];
-    const stackBB = hero.getStackSize();
-
-    if (!hand.length || stackBB === undefined) {
-        if (await this.isValidBotAction(defaultCheckAction)) return defaultCheckAction;
-        return defaultFoldAction;
-    }
-
-    const street = this.getCurrentStreet();
-
-    if (street === "preflop") {
-        return await this.getLocalPreflopAction(hand, stackBB);
-    }
-
-    return await this.getLocalPostflopAction(hand);
-}
-
-private async getLocalPreflopAction(hand: string[], stackBB: number): Promise<BotAction> {
-    const hand_key = this.normalizeHand(hand);
-
-    const premium_hands = new Set([
-        "AA", "KK", "QQ", "JJ", "TT", "99",
-        "AKs", "AQs", "AJs", "KQs",
-        "AKo", "AQo"
-    ]);
-
-    const playable_hands = new Set([
-        "88", "77", "66",
-        "ATs", "KJs", "QJs", "JTs", "T9s", "98s", "87s",
-        "AJo", "KQo", "QJo", "JTo"
-    ]);
-
-    const can_check = await this.isValidBotAction(defaultCheckAction);
-    const can_call = await this.isValidBotAction({
-        action_str: "call",
-        bet_size_in_BBs: Math.min(1, stackBB)
-    });
-    const can_raise_small = await this.isValidBotAction({
-        action_str: "raise",
-        bet_size_in_BBs: Math.min(2.5, stackBB)
-    });
-    const can_raise_bigger = await this.isValidBotAction({
-        action_str: "raise",
-        bet_size_in_BBs: Math.min(4, stackBB)
-    });
-
-    // Free option, usually BB checking or similar
-    if (can_check) {
-        if (premium_hands.has(hand_key) && can_raise_bigger) {
-            return {
-                action_str: "raise",
-                bet_size_in_BBs: Math.min(4, stackBB)
-            };
-        }
-
+    if (await this.isValidBotAction(defaultCheckAction)) {
         return defaultCheckAction;
-    }
-
-    if (premium_hands.has(hand_key)) {
-        if (can_raise_small) {
-            return {
-                action_str: "raise",
-                bet_size_in_BBs: Math.min(3, stackBB)
-            };
-        }
-
-        if (can_call) {
-            return {
-                action_str: "call",
-                bet_size_in_BBs: Math.min(1, stackBB)
-            };
-        }
-    }
-
-    if (playable_hands.has(hand_key)) {
-        if (can_call) {
-            return {
-                action_str: "call",
-                bet_size_in_BBs: Math.min(1, stackBB)
-            };
-        }
     }
 
     return defaultFoldAction;
 }
 
-private async getLocalPostflopAction(hand: string[]): Promise<BotAction> {
-    const can_check = await this.isValidBotAction(defaultCheckAction);
-    if (can_check) {
-        return defaultCheckAction;
-    }
 
-    const board = this.getCurrentBoard();
-    const has_pair_or_better = this.hasPairOrBetter(hand, board);
 
-    if (has_pair_or_better) {
-        const call_action = {
-            action_str: "call",
-            bet_size_in_BBs: 1
-        };
 
-        if (await this.isValidBotAction(call_action)) {
-            return call_action;
-        }
-    }
-
-    return defaultFoldAction;
-}
-
-private normalizeHand(cards: string[]): string {
-    const [a, b] = cards;
-    const r1 = a[0].toUpperCase();
-    const r2 = b[0].toUpperCase();
-    const s1 = a[1];
-    const s2 = b[1];
-
-    const order = "AKQJT98765432";
-    const sorted = [r1, r2].sort((x, y) => order.indexOf(x) - order.indexOf(y));
-
-    const hi = sorted[0];
-    const lo = sorted[1];
-
-    if (hi === lo) return hi + lo;
-    return hi + lo + (s1 === s2 ? "s" : "o");
-}
-
-private hasPairOrBetter(hand: string[], board: string[]): boolean {
-    const ranks = [...hand, ...board].map(card => card[0].toUpperCase());
-    const counts = new Map<string, number>();
-
-    for (const rank of ranks) {
-        counts.set(rank, (counts.get(rank) ?? 0) + 1);
-    }
-
-    for (const count of counts.values()) {
-        if (count >= 2) {
-            return true;
-        }
-    }
-
-    return false;
-}
 
 private async queryBotAction(
     query: string,
@@ -535,7 +406,8 @@ private async queryBotAction(
     }
 
     try {
-        await sleep(2000);
+        const ACTION_SYNC_DELAY_MS = 100;
+await sleep(ACTION_SYNC_DELAY_MS);
 
         const ai_response = await this.ai_service.query(query, this.hand_history);
         this.hand_history = ai_response.prev_messages;
@@ -616,6 +488,11 @@ private async queryBotAction(
     private async performBotAction(bot_action: BotAction): Promise<void> {
         console.log("Bot Action:", bot_action.action_str);
         let bet_size = convertToValue(bot_action.bet_size_in_BBs, this.game.getBigBlind());
+        console.log("Bot Action (BBs):", bot_action);
+console.log("Big Blind:", this.game.getBigBlind());
+console.log("Converted Bet Size:", bet_size);
+console.log("Current Pot (BB):", this.table.getPot());
+console.log("Current Street:", this.table.getStreet());
         switch (bot_action.action_str) {
             case "bet":
                 console.log("Bet Size:", convertToBBs(bet_size, this.game.getBigBlind()));
