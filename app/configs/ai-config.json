@@ -1,5 +1,5 @@
 {
-    "provider": "Google",
-    "model_name": "gemini-1.5-pro",
-    "playstyle": "neutral"
+  "provider": "Google",
+  "model_name": "gemini-3-flash-preview",
+  "playstyle": "neutral"
 }

@@ -13,7 +13,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.14.1",
     "chai": "^5.1.1",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.6.1",
     "express": "^4.19.2",
     "node-fetch": "^2.7.0",
     "openai": "^4.52.1",

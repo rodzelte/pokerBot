@@ -311,35 +311,256 @@ export class Bot {
         }
     }
 
-    private async queryBotAction(query: string, retries: number, retry_counter: number = 0): Promise<BotAction> {
-        if (retry_counter > retries) {
-            if (await this.isValidBotAction(defaultCheckAction)) {
-                console.log(`Failed to query bot action, exceeded the retry limit after ${retries} attempts. Defaulting to checking.`);
-                return defaultCheckAction;
-            } else {
-                console.log(`Failed to query bot action, exceeded the retry limit after ${retries} attempts. Defaulting to folding.`);
-                return defaultFoldAction;
-            }
-        }
-        try {
-            await sleep(2000);
-            const ai_response = await this.ai_service.query(query, this.hand_history);
-            this.hand_history = ai_response.prev_messages;
+    private getCurrentStreet(): string {
+    const game_any = this.game as any;
 
-            if (await this.isValidBotAction(ai_response.bot_action)) {
-                // only push to hand history if the choice made is valid
-                if (ai_response.curr_message) {
-                    this.hand_history.push(ai_response.curr_message);
-                }
-                return ai_response.bot_action;
-            }
-            console.log("Invalid bot action, retrying query.");
-            return await this.queryBotAction(query, retries, retry_counter + 1);
-        } catch (err) {
-            console.log("Error while querying ChatGPT:", err, "retrying query.");
-            return await this.queryBotAction(query, retries, retry_counter + 1);
+    if (typeof game_any.getStreet === "function") {
+        return game_any.getStreet();
+    }
+
+    if (typeof game_any.getCurrentStreet === "function") {
+        return game_any.getCurrentStreet();
+    }
+
+    return "preflop";
+}
+
+private getCurrentBoard(): string[] {
+    const table_any = this.table as any;
+    const game_any = this.game as any;
+
+    if (typeof table_any.getBoard === "function") {
+        return table_any.getBoard() ?? [];
+    }
+
+    if (typeof game_any.getBoard === "function") {
+        return game_any.getBoard() ?? [];
+    }
+
+    return [];
+}
+
+
+private async getLocalFallbackAction(): Promise<BotAction> {
+    const hero = this.game.getHero();
+
+    if (!hero) {
+        if (await this.isValidBotAction(defaultCheckAction)) return defaultCheckAction;
+        return defaultFoldAction;
+    }
+
+    const hand = hero.getHand() ?? [];
+    const stackBB = hero.getStackSize();
+
+    if (!hand.length || stackBB === undefined) {
+        if (await this.isValidBotAction(defaultCheckAction)) return defaultCheckAction;
+        return defaultFoldAction;
+    }
+
+    const street = this.getCurrentStreet();
+
+    if (street === "preflop") {
+        return await this.getLocalPreflopAction(hand, stackBB);
+    }
+
+    return await this.getLocalPostflopAction(hand);
+}
+
+private async getLocalPreflopAction(hand: string[], stackBB: number): Promise<BotAction> {
+    const hand_key = this.normalizeHand(hand);
+
+    const premium_hands = new Set([
+        "AA", "KK", "QQ", "JJ", "TT", "99",
+        "AKs", "AQs", "AJs", "KQs",
+        "AKo", "AQo"
+    ]);
+
+    const playable_hands = new Set([
+        "88", "77", "66",
+        "ATs", "KJs", "QJs", "JTs", "T9s", "98s", "87s",
+        "AJo", "KQo", "QJo", "JTo"
+    ]);
+
+    const can_check = await this.isValidBotAction(defaultCheckAction);
+    const can_call = await this.isValidBotAction({
+        action_str: "call",
+        bet_size_in_BBs: Math.min(1, stackBB)
+    });
+    const can_raise_small = await this.isValidBotAction({
+        action_str: "raise",
+        bet_size_in_BBs: Math.min(2.5, stackBB)
+    });
+    const can_raise_bigger = await this.isValidBotAction({
+        action_str: "raise",
+        bet_size_in_BBs: Math.min(4, stackBB)
+    });
+
+    // Free option, usually BB checking or similar
+    if (can_check) {
+        if (premium_hands.has(hand_key) && can_raise_bigger) {
+            return {
+                action_str: "raise",
+                bet_size_in_BBs: Math.min(4, stackBB)
+            };
+        }
+
+        return defaultCheckAction;
+    }
+
+    if (premium_hands.has(hand_key)) {
+        if (can_raise_small) {
+            return {
+                action_str: "raise",
+                bet_size_in_BBs: Math.min(3, stackBB)
+            };
+        }
+
+        if (can_call) {
+            return {
+                action_str: "call",
+                bet_size_in_BBs: Math.min(1, stackBB)
+            };
         }
     }
+
+    if (playable_hands.has(hand_key)) {
+        if (can_call) {
+            return {
+                action_str: "call",
+                bet_size_in_BBs: Math.min(1, stackBB)
+            };
+        }
+    }
+
+    return defaultFoldAction;
+}
+
+private async getLocalPostflopAction(hand: string[]): Promise<BotAction> {
+    const can_check = await this.isValidBotAction(defaultCheckAction);
+    if (can_check) {
+        return defaultCheckAction;
+    }
+
+    const board = this.getCurrentBoard();
+    const has_pair_or_better = this.hasPairOrBetter(hand, board);
+
+    if (has_pair_or_better) {
+        const call_action = {
+            action_str: "call",
+            bet_size_in_BBs: 1
+        };
+
+        if (await this.isValidBotAction(call_action)) {
+            return call_action;
+        }
+    }
+
+    return defaultFoldAction;
+}
+
+private normalizeHand(cards: string[]): string {
+    const [a, b] = cards;
+    const r1 = a[0].toUpperCase();
+    const r2 = b[0].toUpperCase();
+    const s1 = a[1];
+    const s2 = b[1];
+
+    const order = "AKQJT98765432";
+    const sorted = [r1, r2].sort((x, y) => order.indexOf(x) - order.indexOf(y));
+
+    const hi = sorted[0];
+    const lo = sorted[1];
+
+    if (hi === lo) return hi + lo;
+    return hi + lo + (s1 === s2 ? "s" : "o");
+}
+
+private hasPairOrBetter(hand: string[], board: string[]): boolean {
+    const ranks = [...hand, ...board].map(card => card[0].toUpperCase());
+    const counts = new Map<string, number>();
+
+    for (const rank of ranks) {
+        counts.set(rank, (counts.get(rank) ?? 0) + 1);
+    }
+
+    for (const count of counts.values()) {
+        if (count >= 2) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+private async queryBotAction(
+    query: string,
+    retries: number,
+    retry_counter: number = 0
+): Promise<BotAction> {
+    const getFallbackAction = async (): Promise<BotAction> => {
+        const local_action = await this.getLocalFallbackAction();
+
+        if (await this.isValidBotAction(local_action)) {
+            console.log("Using local fallback action.");
+            return local_action;
+        }
+
+        if (await this.isValidBotAction(defaultCheckAction)) {
+            console.log("Local fallback invalid. Defaulting to checking.");
+            return defaultCheckAction;
+        }
+
+        console.log("Local fallback invalid. Defaulting to folding.");
+        return defaultFoldAction;
+    };
+
+    const isNonRetryableError = (err: any): boolean => {
+        const status = err?.status;
+        const message = String(err?.message ?? "");
+
+        return (
+            status === 400 ||
+            status === 404 ||
+            status === 429 ||
+            message.includes("API_KEY_INVALID") ||
+            message.includes("quota") ||
+            message.includes("Too Many Requests") ||
+            (message.includes("model") && message.includes("not found"))
+        );
+    };
+
+    if (retry_counter > retries) {
+        console.log(`Failed to query bot action, exceeded the retry limit after ${retries} attempts.`);
+        return await getFallbackAction();
+    }
+
+    try {
+        await sleep(2000);
+
+        const ai_response = await this.ai_service.query(query, this.hand_history);
+        this.hand_history = ai_response.prev_messages;
+
+        if (await this.isValidBotAction(ai_response.bot_action)) {
+            if (ai_response.curr_message) {
+                this.hand_history.push(ai_response.curr_message);
+            }
+            return ai_response.bot_action;
+        }
+
+        console.log("Invalid bot action, retrying query.");
+        return await this.queryBotAction(query, retries, retry_counter + 1);
+    } catch (err: any) {
+        console.log("Error while querying AI:", err);
+
+        if (isNonRetryableError(err)) {
+            console.log("Non-retryable AI error detected. Using fallback action.");
+            return await getFallbackAction();
+        }
+
+        console.log("Retrying query.");
+        return await this.queryBotAction(query, retries, retry_counter + 1);
+    }
+}
 
     private async isValidBotAction(bot_action: BotAction): Promise<boolean> {
         console.log("Attempted Bot Action:", bot_action);
