@@ -1,5 +1,5 @@
 {
-  "provider": "Google",
-  "model_name": "gemini-3-flash-preview",
+  "provider": "RLCard",
+  "model_name": "dqn",
   "playstyle": "neutral"
 }

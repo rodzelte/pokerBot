@@ -1,6 +1,7 @@
 import { AIService } from "../interfaces/ai-client-interfaces.ts";
 import { GoogleAIService } from "../services/ai/googleai-service.ts";
 import { OpenAIService } from "../services/ai/openai-service.ts";
+import { RLCardService } from "../services/ai/rlcard-service.ts";
 
 export class AIServiceFactory {
     private supportedModels: Map<string, string[]>;
@@ -8,7 +9,8 @@ export class AIServiceFactory {
     constructor(){
         this.supportedModels = new Map<string, string[]>([
             ["OpenAI", ["gpt-3.5-turbo", "gpt-4-turbo", "gpt-4o"]],
-            ["Google", ["gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview"]]
+            ["Google", ["gemini-2.5-pro", "gemini-3-flash-preview", "gemini-3.1-pro-preview"]],
+            ["RLCard", ["dqn"]]
         ]);
     }
 
@@ -29,6 +31,9 @@ export class AIServiceFactory {
                     throw new Error (`Invalid ${provider} auth key.`);
                 }
                 return new GoogleAIService(googleai_auth_key, model_name, playstyle);
+            case ("RLCard"):
+                const serverUrl = process.env.RLCARD_SERVER_URL ?? "http://127.0.0.1:5050";
+                return new RLCardService(serverUrl, playstyle);
         }
         throw new Error("Failed to create AI service.");
     }

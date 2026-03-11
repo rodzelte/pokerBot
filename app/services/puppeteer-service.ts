@@ -33,6 +33,10 @@ export class PuppeteerService {
     async closeBrowser(): Promise<void> {
         await this.browser.close();
     }
+
+    public getPage(): puppeteer.Page {
+        return this.page;
+    }
     
     async navigateToGame<D, E=Error>(game_id: string): Response<D, E> {
         if (!game_id) {
@@ -152,13 +156,7 @@ export class PuppeteerService {
         }
     }
     
-    // game has not started yet -> "waiting state"
-    // joined when hand is currently in progress -> "in next hand"
-    // if player is in waiting state, wait for next hand
-    // otherwise, return
     async waitForNextHand<D, E=Error>(num_players: number, max_turn_length: number): Response<D, E> {
-        // check if the player is in a waiting state
-        // if not, return
         try {
             await this.page.waitForSelector([".you-player > .waiting", ".you-player > .waiting-next-hand"].join(','), {timeout: this.default_timeout});
         } catch (err) {
@@ -167,7 +165,6 @@ export class PuppeteerService {
                 error: new Error("Player is not in waiting state.") as E
             }
         }
-        // if player is in waiting state, wait for the waiting state to disappear
         try {
             await this.page.waitForSelector([".you-player > .waiting", ".you-player > .waiting-next-hand"].join(','), 
             {hidden: true, timeout: computeTimeout(num_players, max_turn_length, 4) * 5 + this.default_timeout});
@@ -204,7 +201,6 @@ export class PuppeteerService {
     
     }
     
-    // wait for bot's turn or winner of hand has been determined
     async waitForBotTurnOrWinner<D, E=Error>(num_players: number, max_turn_length: number): Response<D, E> {
         try {
             const el = await this.page.waitForSelector([".action-signal", ".table-player.winner"].join(','), {timeout: computeTimeout(num_players, max_turn_length, 4) * 5 + this.default_timeout});
@@ -280,7 +276,56 @@ export class PuppeteerService {
             }
         }
     }
-    
+
+    // ── NEW METHOD ──────────────────────────────────────────────────────────
+    // Scrapes the community cards currently visible on the board.
+    // Returns an empty array on preflop (no cards shown yet).
+    // Selector confirmed against live PokerNow DOM:
+    //   .table-cards .card-container  — each visible board card
+    async getCommunityCards<D, E=Error>(): Response<D, E> {
+        try {
+            // If no board cards are present yet (preflop), the selector won't
+            // match anything — that is valid, so we return an empty array.
+            const card_divs = await this.page.$$(".table-cards .card-container");
+
+            if (card_divs.length === 0) {
+                console.log("[Puppeteer] No community cards on board (preflop).");
+                return {
+                    code: "success",
+                    data: [] as unknown as D,
+                    msg: "No community cards present."
+                };
+            }
+
+            const cards: string[] = [];
+            for (const card_div of card_divs) {
+                // Each card container holds a .value span and a .sub-suit span,
+                // matching the same structure used by getHand().
+                const card_value      = await card_div.$eval(".value",    (s: any) => s.textContent).catch(() => null);
+                const sub_suit_letter = await card_div.$eval(".sub-suit", (s: any) => s.textContent).catch(() => null);
+
+                if (card_value && sub_suit_letter) {
+                    cards.push(card_value + sub_suit_letter);
+                } else {
+                    console.warn("[Puppeteer] Skipping malformed community card div.");
+                }
+            }
+
+            console.log("[Puppeteer] Community cards scraped:", cards.join(" "));
+            return {
+                code: "success",
+                data: cards as unknown as D,
+                msg: `Successfully scraped ${cards.length} community card(s).`
+            };
+        } catch (err) {
+            return {
+                code: "error",
+                error: new Error("Failed to scrape community cards from board.") as E
+            };
+        }
+    }
+    // ── END NEW METHOD ──────────────────────────────────────────────────────
+
     async getStackSize<D, E=Error>(): Response<D, E> {
         try {
             await this.page.waitForSelector(".you-player > .table-player-infos-ctn > div > .table-player-stack");
@@ -510,6 +555,125 @@ export class PuppeteerService {
             code: "success",
             data: null as D,
             msg: "Waited for hand to finish."
+        }
+    }
+
+    /**
+     * Detect the dealer button seat number from the PokerNow DOM.
+     *
+     * PokerNow places a `.dealer-button-ctn` element inside the
+     * table-player div that holds the button. The seat number is
+     * extracted from the parent's class (e.g. `table-player-5` → seat 5).
+     *
+     * Returns the 1-based seat number, or null if undetectable.
+     */
+    async getDealerSeat<D, E=Error>(): Response<D, E> {
+        try {
+            const seatNum = await this.page.evaluate(() => {
+                // Strategy 1: look for .dealer-button-ctn inside a table-player
+                const dealerEl = (globalThis as any).document.querySelector(
+                    ".dealer-button-ctn"
+                );
+                if (dealerEl) {
+                    const parent = dealerEl.closest("[class*='table-player-']") as any;
+                    if (parent) {
+                        const match = parent.className.match(/table-player-(\d+)/);
+                        if (match) return parseInt(match[1], 10);
+                    }
+                }
+
+                // Strategy 2: look for the dealer class directly on a table-player
+                const dealerPlayer = (globalThis as any).document.querySelector(
+                    ".table-player.dealer, .table-player .dealer-button"
+                );
+                if (dealerPlayer) {
+                    const el = dealerPlayer.closest("[class*='table-player-']") as any;
+                    if (el) {
+                        const match = el.className.match(/table-player-(\d+)/);
+                        if (match) return parseInt(match[1], 10);
+                    }
+                }
+
+                // Strategy 3: scan all table-players for a "D" badge or button icon
+                const players = (globalThis as any).document.querySelectorAll(
+                    "[class*='table-player-']"
+                );
+                for (const p of players) {
+                    const text = p.innerText ?? "";
+                    // PokerNow sometimes shows "Dealer" in the status line
+                    if (/\bDealer\b/i.test(text) && !text.includes("Away")) {
+                        const match = p.className.match(/table-player-(\d+)/);
+                        if (match) return parseInt(match[1], 10);
+                    }
+                }
+
+                return null;
+            });
+
+            if (seatNum !== null) {
+                console.log(`[Puppeteer] Dealer button detected at seat ${seatNum}.`);
+                return {
+                    code: "success",
+                    data: seatNum as D,
+                    msg: `Dealer is at seat ${seatNum}.`
+                };
+            }
+
+            return {
+                code: "error",
+                error: new Error("Dealer button not found in DOM.") as E
+            };
+        } catch (err) {
+            return {
+                code: "error",
+                error: new Error("Failed to detect dealer seat.") as E
+            };
+        }
+    }
+
+    /**
+     * Scrape all occupied seats and their player names from the DOM.
+     * Returns an array of { seat: number, name: string } sorted by seat.
+     */
+    async getSeatedPlayers<D, E=Error>(): Response<D, E> {
+        try {
+            const players = await this.page.evaluate(() => {
+                const result: { seat: number; name: string }[] = [];
+                const divs = (globalThis as any).document.querySelectorAll(
+                    ".table-player"
+                );
+                for (const div of divs) {
+                    // Skip empty seats (those with a .table-player-seat class)
+                    if (div.classList.contains("table-player-seat")) continue;
+                    // Skip offline/standing players
+                    const status = div.querySelector(".table-player-status-icon");
+                    if (status) {
+                        const statusText = status.textContent ?? "";
+                        if (/standing.up|away/i.test(statusText)) continue;
+                    }
+
+                    const seatMatch = div.className.match(/table-player-(\d+)/);
+                    const nameEl = div.querySelector(".table-player-name span");
+                    if (seatMatch && nameEl) {
+                        result.push({
+                            seat: parseInt(seatMatch[1], 10),
+                            name: (nameEl.textContent ?? "").trim(),
+                        });
+                    }
+                }
+                return result.sort((a: any, b: any) => a.seat - b.seat);
+            });
+
+            return {
+                code: "success",
+                data: players as D,
+                msg: `Found ${(players as any[]).length} seated player(s).`
+            };
+        } catch (err) {
+            return {
+                code: "error",
+                error: new Error("Failed to scrape seated players.") as E
+            };
         }
     }
 }

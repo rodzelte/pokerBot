@@ -139,7 +139,7 @@ export function estimateRangeAdvantage(
   if (texture.isPaired) score -= 0.10;
 
   // Very wet boards help the caller's wide range more
-  if (texture.wetScore >= 3) score -= 0.15;
+  if (texture.wetScore >= 3) score -= 0.05;
 
   return Math.max(-1, Math.min(1, score));
 }
@@ -183,7 +183,7 @@ export function calcBlockerScore(hand: string[], board: string[]): number {
   if (ranks.includes(topBoardRank ?? "")) score += 1;
 
   // Block nut straight: hold an A or the card completing the most likely straight
-  if (ranks.includes("A")) score += 0.5;
+  if (ranks.includes("A")) score += 1;
 
   return Math.min(3, score);
 }
@@ -264,7 +264,7 @@ export function estimateFoldEquity(
   if (sampleHands < 10) return 0.45; // unknown villain, assume average
 
   // Base: tighter villains fold more
-  let base = 0.65 - (villainVPIP / 200); // 45% base for 40vpip, 55% for 20vpip
+  let base = 0.70 - (villainVPIP / 250); // 45% base for 40vpip, 55% for 20vpip
 
   // Aggression-based adjustment: aggressive villains call/raise more
   const aggrFactor = Math.min(1, villainPFR / 30);
@@ -291,23 +291,23 @@ export function estimateFoldEquity(
 export type PreflopTier = "premium" | "strong" | "medium" | "speculative" | "marginal";
 
 const TIER_MAP: Record<string, PreflopTier> = {
-  AA:"premium", KK:"premium", QQ:"premium", JJ:"strong",
-  TT:"strong",  AKs:"premium", AKo:"strong", AQs:"strong",
-  AQo:"strong", AJs:"strong", KQs:"strong",
-  "99":"medium", "88":"medium", ATs:"medium", AJo:"medium",
-  KJs:"medium", KQo:"medium", QJs:"medium", JTs:"medium",
-  "77":"medium", "66":"speculative", "55":"speculative",
+  AA:"premium", KK:"premium", QQ:"premium", JJ:"premium",
+  TT:"premium", AKs:"premium", AKo:"premium", AQs:"premium",
+  AQo:"strong", AJs:"strong", KQs:"premium",
+  "99":"strong", "88":"strong", ATs:"strong", AJo:"strong",
+  KJs:"strong", KQo:"strong", QJs:"strong", JTs:"strong",
+  "77":"medium", "66":"medium", "55":"medium",
   "44":"speculative", "33":"speculative", "22":"speculative",
-  A9s:"speculative", A8s:"speculative", A7s:"speculative",
-  A6s:"speculative", A5s:"speculative", A4s:"speculative",
+  A9s:"medium", A8s:"medium", A7s:"medium",
+  A6s:"medium", A5s:"medium", A4s:"speculative",
   A3s:"speculative", A2s:"speculative",
-  KTs:"speculative", K9s:"speculative",
-  QTs:"speculative", Q9s:"speculative",
+  KTs:"medium", K9s:"medium",
+  QTs:"medium", Q9s:"speculative",
   J9s:"speculative",
-  T9s:"speculative", "98s":"speculative", "87s":"speculative",
-  "76s":"speculative", "65s":"speculative", "54s":"speculative",
-  ATo:"marginal", A9o:"marginal", KJo:"marginal", KTo:"marginal",
-  QJo:"marginal", QTo:"marginal", JTo:"marginal",
+  T9s:"medium", "98s":"medium", "87s":"medium",
+  "76s":"medium", "65s":"speculative", "54s":"speculative",
+  ATo:"medium", A9o:"speculative", KJo:"medium", KTo:"speculative",
+  QJo:"speculative", QTo:"speculative", JTo:"speculative",
 };
 
 export function getPreflopTier(handKey: HandKey): PreflopTier {

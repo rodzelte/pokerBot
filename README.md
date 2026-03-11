@@ -24,6 +24,13 @@
     <li>
       <a href="#supported-models">Supported Models</a>
     </li>
+    <li>
+      <a href="#rlcard-ai-python">RLCard AI (Python)</a>
+      <ul>
+        <li><a href="#training-the-dqn-agent">Training</a></li>
+        <li><a href="#running-the-rlcard-server">Running the Server</a></li>
+        <li><a href="#decision-pipeline">Decision Pipeline</a></li>
+      </ul>
     </li>
     <li><a href="#license">License</a></li>
     <li><a href="#contact">Contact</a></li>
@@ -111,6 +118,86 @@ OpenAI: "gpt-3.5-turbo", "gpt-4-turbo", "gpt-4o"
 
 Google: "gemini-1.5-flash", "gemini-1.0-pro", "gemini-1.5-pro"
 
+<!-- RLCARD AI -->
+## RLCard AI (Python)
+
+The bot includes an RL-based poker AI powered by [rlcard](https://github.com/datamllab/rlcard). A Python FastAPI server wraps a trained DQN agent and serves decisions to the TypeScript bot over HTTP.
+
+### Requirements
+
+- Python 3.10–3.12 (CUDA PyTorch wheels are not available for 3.13+)
+- pip
+
+### Setup
+
+1. Install Python dependencies
+   ```sh
+   cd python
+   pip install rlcard torch fastapi uvicorn
+   ```
+
+2. *(Optional — for GPU training)* Install the CUDA build of PyTorch instead
+   ```sh
+   pip install torch --index-url https://download.pytorch.org/whl/cu124
+   ```
+
+### Training the DQN Agent
+
+Train a DQN agent from scratch or resume from an existing checkpoint:
+
+```sh
+cd python
+
+# Train for 500k episodes (auto-resumes if a checkpoint exists)
+python train_dqn.py --episodes 500000
+
+# Customize training
+python train_dqn.py --episodes 2000000 --eval-every 5000 --lr 0.0005
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--episodes` | 50000 | Total training episodes |
+| `--eval-every` | 5000 | Evaluate & checkpoint every N episodes |
+| `--eval-num` | 1000 | Number of evaluation games per checkpoint |
+| `--seed` | 42 | Random seed |
+| `--save-dir` | `./models/dqn` | Directory for checkpoints |
+| `--resume` | *(auto)* | Path to checkpoint to resume from |
+| `--lr` | 0.0005 | Learning rate |
+
+Training progress is logged to `models/dqn/performance.csv`. Checkpoints auto-resume — if you stop and restart, it picks up where it left off.
+
+### Running the RLCard Server
+
+After training, start the server so the bot can query it:
+
+```sh
+cd python
+
+# Uses the default checkpoint at ./models/dqn/checkpoint.pt
+python rlcard_server.py
+
+# Or train the model
+python train_dqn.py --episodes 2000000
+
+
+# Or specify a custom model path
+set RLCARD_MODEL_PATH=./models/dqn/checkpoint.pt
+python rlcard_server.py
+```
+
+The server listens on `http://127.0.0.1:5050`. The bot automatically connects to it on startup — if the server is not running, the bot falls back to the local engine and LLM.
+
+### Decision Pipeline
+
+When the RLCard server is running, the bot uses this priority order:
+
+1. **RLCard AI** (primary) — RL-trained DQN agent. High-confidence hands get larger bet sizing automatically.
+2. **Local Poker Engine** (secondary) — Rule-based GTO engine, used when RLCard is unavailable.
+3. **LLM API** (tertiary) — OpenAI/Google as a last-resort override when the engine wants to fold.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
 <!-- LICENSE -->
 ## License
 
@@ -121,9 +208,9 @@ Distributed under the MIT License. See `LICENSE.txt` for more information.
 <!-- CONTACT -->
 ## Contact
 
-pokernowgpt@gmail.com
+zythonix.te@gmail.com
 
-Project Link: [https://github.com/csong2022/pokernow-gpt](https://github.com/csong2022/pokernow-gpt)
+Project Link: [https://github.com/rodzelte/pokerBot](https://github.com/rodzelte/pokerBot)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

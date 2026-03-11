@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "monteCarloTrials": 5000,
+  "useOnStreets": ["flop", "turn", "river"],
+  "maxSolveTimeMs": 5000
+}

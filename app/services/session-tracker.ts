@@ -17,7 +17,8 @@
  * informed by ALL hands ever played — not just the current session.
  */
 
-import { StyleProfile, selectProfile, getProfile, StrategyProfile } from "./gto-strategy-profiles.ts";
+import { StyleProfile, selectProfile, getProfile } from "./gto-strategy-profiles.ts";
+import type { StrategyProfile } from "./gto-strategy-profiles.ts";
 import db_service from "../services/db-service.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -95,6 +96,12 @@ export class SessionTracker {
   private consecutiveLosses = 0;
   private consecutiveWins = 0;
   private currentBias: StyleProfile = "gto";
+  private villainAdj: {
+    callThresholdDelta: number;
+    bluffFreqDelta: number;
+    threeBetFreqDelta: number;
+    foldToCBet: boolean;
+  } | null = null;
 
   // Lifetime counters — loaded from DB on init
   private lifetime: LifetimeCounters = {
@@ -284,19 +291,59 @@ export class SessionTracker {
   }
 
   public getAdaptiveProfile(
-    baseProfile: StrategyProfile,
+    base: StrategyProfile,
     currentStackBB: number,
     startingStackBB: number
   ): StrategyProfile {
-    const leaks = this.detectLeaks();
-    const hasCriticalLeak = leaks.some((l) => l.severity === "high");
+    let profile = base;
+    const stackRatio = startingStackBB > 0 ? currentStackBB / startingStackBB : 1;
 
-    if (this.consecutiveLosses >= 5 || hasCriticalLeak) {
-      console.log("[SessionTracker] Tilt protection — switching to TIGHT");
-      return getProfile("tight");
+    if (stackRatio < 0.70) {
+      profile = {
+        ...profile,
+        callEquityThreshold: Math.min(0.50, profile.callEquityThreshold + 0.04),
+      };
     }
 
-    return getProfile(this.currentBias);
+    if (stackRatio > 1.30) {
+      profile = {
+        ...profile,
+        callEquityThreshold: Math.max(0.22, profile.callEquityThreshold - 0.04),
+      };
+    }
+
+    if (this.villainAdj) {
+      const adj = this.villainAdj;
+      profile = {
+        ...profile,
+        callEquityThreshold: Math.max(
+          0.15,
+          Math.min(0.60, profile.callEquityThreshold + adj.callThresholdDelta)
+        ),
+        mixed: {
+          ...profile.mixed,
+          flopCBetAir: Math.max(0, Math.min(0.90, profile.mixed.flopCBetAir + adj.bluffFreqDelta)),
+          turnCBetAir: Math.max(0, Math.min(0.90, profile.mixed.turnCBetAir + adj.bluffFreqDelta * 0.70)),
+          riverBluff: Math.max(0, Math.min(0.80, profile.mixed.riverBluff + adj.bluffFreqDelta * 0.50)),
+          lightThreeBet: Math.max(0, Math.min(0.70, profile.mixed.lightThreeBet + adj.threeBetFreqDelta)),
+        },
+      };
+    }
+
+    return profile;
+  }
+
+  public applyVillainAdjustments(adj: {
+    callThresholdDelta: number;
+    bluffFreqDelta: number;
+    threeBetFreqDelta: number;
+    foldToCBet: boolean;
+  }): void {
+    this.villainAdj = adj;
+  }
+
+  public clearVillainAdjustments(): void {
+    this.villainAdj = null;
   }
 
   public kellyBetAdjustment(
@@ -471,7 +518,7 @@ export class SessionTracker {
         outcome.action,
         outcome.sizeBB,
         outcome.potBB,
-        outcome.wonBB,
+        isNaN(outcome.wonBB) ? 0 : outcome.wonBB,   // ← guard against NaN
         outcome.showdown ? 1 : 0,
         outcome.villainVPIP ?? null,
         outcome.villainPFR  ?? null,
@@ -541,4 +588,5 @@ export class SessionTracker {
       this.currentBias = "gto";
     }
   }
+
 }

@@ -1,4 +1,19 @@
+/**
+ * equity-estimator.ts
+ *
+ * Hybrid approach:
+ *   - `pokersolver` (via HandEvaluator) for hand evaluation in MC simulations
+ *   - `poker-odds-calc` for known hero-vs-villain equity (quickEquityAgainstHand)
+ *   - Preflop lookup table for instant preflop equity
+ *
+ * Same exported types & API as the original estimator.
+ */
+
 import { HandEvaluator } from "./hand-evaluator.ts";
+// @ts-ignore — poker-odds-calc ships JS only
+import { TexasHoldem as OddsTable } from "poker-odds-calc";
+
+export type EquityMethod = "preflop-table" | "poker-odds-calc" | "monte-carlo" | "hand-evaluator";
 
 export type EquityResult = {
   winRate: number;
@@ -8,7 +23,6 @@ export type EquityResult = {
 };
 
 // Precomputed equity lookup for common preflop matchups (hero vs 1 random opponent)
-// These avoid running MC trials for known situations, saving ~5-15ms per call
 const PREFLOP_EQUITY_TABLE: Record<string, number> = {
   AA: 0.852, KK: 0.824, QQ: 0.800, JJ: 0.775, TT: 0.751,
   "99": 0.723, "88": 0.694, "77": 0.664, "66": 0.635, "55": 0.607,
@@ -25,26 +39,44 @@ const PREFLOP_EQUITY_TABLE: Record<string, number> = {
   "65s": 0.493, "54s": 0.475,
 };
 
+/** Normalise a card like "10h" → "Th", "kd" → "Kd" */
+function normaliseCard(c: string): string {
+  let s = c.trim();
+  if (s.startsWith("10")) s = "T" + s.slice(2);
+  return s[0].toUpperCase() + s.slice(1).toLowerCase();
+}
+
 export class EquityEstimator {
   private readonly evaluator = new HandEvaluator();
   private readonly ranks = ["2","3","4","5","6","7","8","9","T","J","Q","K","A"];
   private readonly suits = ["s","h","d","c"];
 
-  // LRU cache keyed by "hand|board|opponents" to avoid re-running identical simulations
   private readonly cache = new Map<string, EquityResult>();
   private readonly MAX_CACHE_SIZE = 512;
+  private lastMethod: EquityMethod = "monte-carlo";
 
+  /** Returns which calculation method was used for the last equity call. */
+  public getLastMethod(): EquityMethod { return this.lastMethod; }
+
+  /**
+   * Estimate hero equity vs N random opponents via Monte-Carlo simulation.
+   * Uses pokersolver-backed HandEvaluator for each trial.
+   */
   public estimateVsRandomRange(
     heroHand: string[],
     board: string[],
     numOpponents: number = 1,
     trials: number = 2000
   ): EquityResult {
-    // Fast path: use preflop lookup table when no board cards are present
-    if (board.length === 0 && numOpponents === 1) {
-      const key = this.handKey(heroHand);
+    const hand = heroHand.map(normaliseCard);
+    const brd  = board.map(normaliseCard);
+
+    // Fast path: preflop lookup table
+    if (brd.length === 0 && numOpponents === 1) {
+      const key = this.handKey(hand);
       const tableEquity = PREFLOP_EQUITY_TABLE[key];
       if (tableEquity !== undefined) {
+        this.lastMethod = "preflop-table";
         return {
           winRate: tableEquity,
           tieRate: 0.02,
@@ -54,54 +86,94 @@ export class EquityEstimator {
       }
     }
 
-    // Adaptive trial count: fewer trials for later streets (less variance)
-    // and for situations where speed matters more than precision
-    const adaptiveTrials = this.getAdaptiveTrials(board, numOpponents, trials);
-
-    const cacheKey = `${heroHand.sort().join(",")}|${board.join(",")}|${numOpponents}|${adaptiveTrials}`;
+    const adaptiveTrials = this.getAdaptiveTrials(brd, trials);
+    const cacheKey = `${[...hand].sort().join(",")}|${brd.join(",")}|${numOpponents}|${adaptiveTrials}`;
     const cached = this.cache.get(cacheKey);
     if (cached) return cached;
 
-    const result = this.runMonteCarlo(heroHand, board, numOpponents, adaptiveTrials);
+    this.lastMethod = "monte-carlo";
+    const result = this.runMonteCarlo(hand, brd, numOpponents, adaptiveTrials);
 
-    // Evict oldest entry if cache is full
     if (this.cache.size >= this.MAX_CACHE_SIZE) {
       const firstKey = this.cache.keys().next().value;
       if (firstKey !== undefined) this.cache.delete(firstKey);
     }
     this.cache.set(cacheKey, result);
-
     return result;
   }
 
-  /**
-   * Quick pre-flop equity estimate using lookup table only (zero MC overhead).
-   * Returns null if hand not found in table.
-   */
+  /** Quick pre-flop equity estimate using lookup table only. */
   public quickPreflopEquity(heroHand: string[]): number | null {
     const key = this.handKey(heroHand);
     return PREFLOP_EQUITY_TABLE[key] ?? null;
   }
 
-  private getAdaptiveTrials(board: string[], numOpponents: number, requestedTrials: number): number {
-    // River: outcome is deterministic given board — fewer trials needed
+  /**
+   * Compute hero win equity against a specific villain hand.
+   * Uses poker-odds-calc when board is incomplete, HandEvaluator when complete.
+   */
+  public quickEquityAgainstHand(
+    heroHand: string[],
+    villainHand: string[],
+    board: string[],
+    _trials: number = 200
+  ): number {
+    const hero = heroHand.map(normaliseCard);
+    const villain = villainHand.map(normaliseCard);
+    const brd = board.map(normaliseCard);
+
+    // Check for card collisions before evaluating
+    const allCards = [...hero, ...villain, ...brd];
+    if (new Set(allCards).size !== allCards.length) {
+      // Cards overlap — cannot compute, return 0.5 (coin flip)
+      return 0.5;
+    }
+
+    // River: deterministic single evaluation via pokersolver
+    if (brd.length === 5) {
+      this.lastMethod = "hand-evaluator";
+      const hEval = this.evaluator.evaluate([...hero, ...brd]);
+      const vEval = this.evaluator.evaluate([...villain, ...brd]);
+      if (hEval.rankValue > vEval.rankValue) return 1;
+      if (hEval.rankValue === vEval.rankValue) return 0.5;
+      return 0;
+    }
+
+    // Use poker-odds-calc for incomplete boards (flop/turn)
+    try {
+      const table = new OddsTable();
+      table.addPlayer(hero as any);
+      table.addPlayer(villain as any);
+      if (brd.length > 0) {
+        table.setBoard(brd as any);
+      }
+      const res = table.calculate();
+      const heroResult = res.getPlayers()[0];
+      const winPct = parseFloat(heroResult.getWinsPercentageString()) / 100;
+      const tiePct = parseFloat(heroResult.getTiesPercentageString()) / 100;
+      this.lastMethod = "poker-odds-calc";
+      return winPct + tiePct * 0.5;
+    } catch {
+      // Fallback: use pokersolver-based MC if poker-odds-calc fails
+      this.lastMethod = "monte-carlo";
+      return this.fallbackEquityAgainstHand(hero, villain, brd);
+    }
+  }
+
+  // ── Internal ──────────────────────────────────────────────────────────────
+
+  private getAdaptiveTrials(board: string[], requestedTrials: number): number {
     if (board.length === 5) return Math.min(requestedTrials, 400);
-    // Turn: one card left, moderate variance
     if (board.length === 4) return Math.min(requestedTrials, 600);
-    // Flop: two cards left, more variance
     if (board.length === 3) return Math.min(requestedTrials, 800);
-    // Preflop fallback (shouldn't be called often due to lookup table)
     return Math.min(requestedTrials, 1000);
   }
 
   private runMonteCarlo(
-    heroHand: string[],
-    board: string[],
-    numOpponents: number,
-    trials: number
+    heroHand: string[], board: string[], numOpponents: number, trials: number
   ): EquityResult {
     let wins = 0, ties = 0, losses = 0;
-    const dead = new Set([...heroHand, ...board]);
+    const dead = new Set([...heroHand.map(normaliseCard), ...board.map(normaliseCard)]);
     const deckTemplate = this.buildDeck().filter((c) => !dead.has(c));
 
     for (let t = 0; t < trials; t++) {
@@ -116,9 +188,7 @@ export class EquityEstimator {
       }
 
       const fullBoard = [...board];
-      while (fullBoard.length < 5) {
-        fullBoard.push(deck[idx++]);
-      }
+      while (fullBoard.length < 5) fullBoard.push(deck[idx++]);
 
       const heroEval = this.evaluator.evaluate([...heroHand, ...fullBoard]);
       const bestVillain = Math.max(
@@ -138,6 +208,41 @@ export class EquityEstimator {
     };
   }
 
+  private fallbackEquityAgainstHand(
+    heroHand: string[], villainHand: string[], board: string[]
+  ): number {
+    const ranks = ["2","3","4","5","6","7","8","9","T","J","Q","K","A"];
+    const suits = ["s","h","d","c"];
+    const dead = new Set([
+      ...heroHand.map(normaliseCard),
+      ...villainHand.map(normaliseCard),
+      ...board.map(normaliseCard),
+    ]);
+    const deck: string[] = [];
+    for (const r of ranks) for (const s of suits) {
+      const c = `${r}${s}`;
+      if (!dead.has(c)) deck.push(c);
+    }
+
+    let wins = 0;
+    const trials = 200;
+    for (let t = 0; t < trials; t++) {
+      const d = [...deck];
+      for (let i = d.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [d[i], d[j]] = [d[j], d[i]];
+      }
+      const fullBoard = [...board];
+      let idx = 0;
+      while (fullBoard.length < 5) fullBoard.push(d[idx++]);
+      const hEval = this.evaluator.evaluate([...heroHand, ...fullBoard]);
+      const vEval = this.evaluator.evaluate([...villainHand, ...fullBoard]);
+      if (hEval.rankValue > vEval.rankValue) wins += 1;
+      else if (hEval.rankValue === vEval.rankValue) wins += 0.5;
+    }
+    return wins / trials;
+  }
+
   private handKey(cards: string[]): string {
     const order = "AKQJT98765432";
     const r1 = cards[0][0].toUpperCase();
@@ -152,11 +257,7 @@ export class EquityEstimator {
 
   private buildDeck(): string[] {
     const deck: string[] = [];
-    for (const r of this.ranks) {
-      for (const s of this.suits) {
-        deck.push(`${r}${s}`);
-      }
-    }
+    for (const r of this.ranks) for (const s of this.suits) deck.push(`${r}${s}`);
     return deck;
   }
 

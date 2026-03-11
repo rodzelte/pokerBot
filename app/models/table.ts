@@ -214,6 +214,88 @@ export class Table {
             }
         }
     }
+
+    /**
+     * Assign positions based on the dealer button seat number.
+     *
+     * Walks clockwise from the dealer to find all occupied seats.
+     * The dealer gets BU. The next occupied seat clockwise gets SB,
+     * then BB, then UTG, etc.
+     *
+     * For heads-up (2 players): dealer = SB (BU/SB), other = BB.
+     *
+     * @param dealerSeat 1-based seat number where the dealer button is
+     */
+    public setPositionsFromDealer(dealerSeat: number): void {
+        // Collect occupied seats in clockwise order starting from dealer
+        const occupiedSeats = Array.from(this.table_seat_to_id.keys()).sort((a, b) => a - b);
+        if (occupiedSeats.length === 0) return;
+
+        // Build a clockwise-ordered list starting from dealer seat
+        const clockwise: number[] = [];
+        const dealerIdx = occupiedSeats.indexOf(dealerSeat);
+
+        if (dealerIdx !== -1) {
+            // Dealer is an occupied seat — start from dealer
+            for (let i = 0; i < occupiedSeats.length; i++) {
+                clockwise.push(occupiedSeats[(dealerIdx + i) % occupiedSeats.length]);
+            }
+        } else {
+            // Dealer seat is empty (rare) — find next occupied seat clockwise
+            let startIdx = 0;
+            for (let i = 0; i < occupiedSeats.length; i++) {
+                if (occupiedSeats[i] > dealerSeat) { startIdx = i; break; }
+                if (i === occupiedSeats.length - 1) startIdx = 0; // wrap around
+            }
+            for (let i = 0; i < occupiedSeats.length; i++) {
+                clockwise.push(occupiedSeats[(startIdx + i) % occupiedSeats.length]);
+            }
+        }
+
+        const n = clockwise.length;
+
+        // Position labels: dealer-first, then SB, BB, UTG...
+        // Heads-up: dealer=SB, other=BB
+        const positionLabels = this.getPositionLabels(n);
+
+        // Assign: clockwise[0] = dealer (BU), clockwise[1] = SB, etc.
+        for (let i = 0; i < n; i++) {
+            const seatNum = clockwise[i];
+            const id = this.table_seat_to_id.get(seatNum)!;
+            this.id_to_position.set(id, positionLabels[i]);
+        }
+
+        console.log(
+            "[Table] Positions from dealer (seat " + dealerSeat + "): " +
+            clockwise.map((s, i) => `seat${s}=${positionLabels[i]}`).join(", ")
+        );
+    }
+
+    /**
+     * Return an array of position labels for N players, starting
+     * from the dealer (BU) and going clockwise.
+     *
+     * Heads-up: [SB, BB]  (dealer is SB in heads-up)
+     * 3 players: [BU, SB, BB]
+     * 4: [BU, SB, BB, UTG]
+     * 5: [BU, SB, BB, UTG, CO]  — no, CO is before BU, so: [BU, SB, BB, UTG, HJ]
+     * Actually the standard is: after BB, fill UTG...MP...HJ...CO, and BU is the last.
+     *
+     * Since we start from the dealer going clockwise:
+     *   dealer(BU) → SB → BB → UTG → UTG+1 → MP → LJ → HJ → CO
+     */
+    private getPositionLabels(n: number): string[] {
+        if (n === 2) return ["SB", "BB"];  // heads-up: dealer = SB
+        if (n === 3) return ["BU", "SB", "BB"];
+        if (n === 4) return ["BU", "SB", "BB", "UTG"];
+        if (n === 5) return ["BU", "SB", "BB", "UTG", "CO"];
+        if (n === 6) return ["BU", "SB", "BB", "UTG", "HJ", "CO"];
+        if (n === 7) return ["BU", "SB", "BB", "UTG", "MP", "HJ", "CO"];
+        if (n === 8) return ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "HJ", "CO"];
+        if (n === 9) return ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "LJ", "HJ", "CO"];
+        // 10 players
+        return ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "MP", "LJ", "HJ", "CO"];
+    }
     public convertAllOrdersToPosition() {
         for (let key of this.id_to_position.keys()) {
             this.id_to_position.set(key, this.convertOrderToPosition(this.id_to_position.get(key), this.num_players));

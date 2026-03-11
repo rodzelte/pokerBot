@@ -14,7 +14,6 @@
  *   2. Randomising indifferent spots via a frequency table
  *   3. Adapting those frequencies based on villain stats (exploitative overlay)
  */
-
 export type StyleProfile = "gto" | "tight" | "loose" | "lag";
 
 /** Per-street sizing options */
@@ -78,11 +77,11 @@ export type StrategyProfile = {
 export const GTO_PROFILE: StrategyProfile = {
   name: "gto",
   description: "Balanced GTO-approximation — unexploitable, mixed strategies",
-  foldEquityThreshold: 0.30,
-  callEquityThreshold: 0.35,
-  semiBluffMinEquity: 0.28,
-  valueBetMinEquity: 0.58,
-  impliedOddsFactor: 0.80, // 80% of pot-odds required (implied upside)
+  foldEquityThreshold: 0.28,
+  callEquityThreshold: 0.33,
+  semiBluffMinEquity: 0.24,
+  valueBetMinEquity: 0.48,
+  impliedOddsFactor: 0.75, // 75% of pot-odds required (implied upside)
   sizing: {
     smallFraction: 0.33,
     medFraction: 0.55,
@@ -90,13 +89,13 @@ export const GTO_PROFILE: StrategyProfile = {
     overbetFraction: 1.25,
   },
   mixed: {
-    flopCBetAir: 0.33,      // bluff c-bet air 33% (GTO range-bet approach)
-    turnCBetAir: 0.20,
-    riverBluff: 0.25,
-    gutshotSemiBluff: 0.45,
+    flopCBetAir: 0.48,      // bluff c-bet air 48% — closer to solver range-bet frequency
+    turnCBetAir: 0.30,
+    riverBluff: 0.32,
+    gutshotSemiBluff: 0.58,
     lightThreeBet: 0.18,
     checkRaiseStrong: 0.30, // mix checking strong hands 30% for balance
-    slowplayMonster: 0.20,
+    slowplayMonster: 0.15,
   },
   kellyFraction: 0.35,
 };
@@ -104,11 +103,11 @@ export const GTO_PROFILE: StrategyProfile = {
 export const TIGHT_PROFILE: StrategyProfile = {
   name: "tight",
   description: "Tight-Aggressive (TAG) — value-heavy, minimal bluffs",
-  foldEquityThreshold: 0.38,
-  callEquityThreshold: 0.42,
-  semiBluffMinEquity: 0.38,
-  valueBetMinEquity: 0.62,
-  impliedOddsFactor: 0.90, // tighter implied-odds requirement
+  foldEquityThreshold: 0.34,
+  callEquityThreshold: 0.38,
+  semiBluffMinEquity: 0.32,
+  valueBetMinEquity: 0.53,
+  impliedOddsFactor: 0.85, // tighter implied-odds requirement
   sizing: {
     smallFraction: 0.40,
     medFraction: 0.60,
@@ -116,12 +115,12 @@ export const TIGHT_PROFILE: StrategyProfile = {
     overbetFraction: 1.00, // rarely overbet
   },
   mixed: {
-    flopCBetAir: 0.15,
-    turnCBetAir: 0.08,
-    riverBluff: 0.10,
-    gutshotSemiBluff: 0.25,
-    lightThreeBet: 0.08,
-    checkRaiseStrong: 0.15,
+    flopCBetAir: 0.28,
+    turnCBetAir: 0.15,
+    riverBluff: 0.18,
+    gutshotSemiBluff: 0.38,
+    lightThreeBet: 0.10,
+    checkRaiseStrong: 0.20,
     slowplayMonster: 0.10,
   },
   kellyFraction: 0.25,
@@ -130,10 +129,10 @@ export const TIGHT_PROFILE: StrategyProfile = {
 export const LOOSE_PROFILE: StrategyProfile = {
   name: "loose",
   description: "Loose-Aggressive (LAG) — wider ranges, more pressure",
-  foldEquityThreshold: 0.22,
-  callEquityThreshold: 0.28,
-  semiBluffMinEquity: 0.22,
-  valueBetMinEquity: 0.52,
+  foldEquityThreshold: 0.20,
+  callEquityThreshold: 0.26,
+  semiBluffMinEquity: 0.20,
+  valueBetMinEquity: 0.45,
   impliedOddsFactor: 0.65,
   sizing: {
     smallFraction: 0.28,
@@ -159,7 +158,7 @@ export const LAG_PROFILE: StrategyProfile = {
   foldEquityThreshold: 0.18,
   callEquityThreshold: 0.24,
   semiBluffMinEquity: 0.18,
-  valueBetMinEquity: 0.48,
+  valueBetMinEquity: 0.45,
   impliedOddsFactor: 0.55,
   sizing: {
     smallFraction: 0.25,

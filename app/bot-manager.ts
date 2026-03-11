@@ -1,17 +1,13 @@
 import dotenv from 'dotenv';
 import prompt from 'prompt-sync';
-
 import { Bot } from './bot.ts'
-
 import ai_config_json from './configs/ai-config.json' with { type: "json" };
 import bot_config_json from './configs/bot-config.json' with { type: "json" };
 import webdriver_config_json from './configs/webdriver-config.json' with { type: "json" };
-
 import { DBService } from './services/db-service.ts';
 import { LogService } from './services/log-service.ts';
 import { PlayerService } from './services/player-service.ts';
 import { PuppeteerService } from './services/puppeteer-service.ts';
-
 import { AIConfig, BotConfig, WebDriverConfig } from './interfaces/config-interfaces.ts';
 import { AIServiceFactory } from './helpers/ai-service-factory.ts';
 
@@ -28,7 +24,10 @@ function init(): string {
 const bot_manager = async function() {
     const game_id = init();
 
-    const puppeteer_service = new PuppeteerService(webdriver_config.default_timeout, webdriver_config.headless_flag);
+    const puppeteer_service = new PuppeteerService(
+        webdriver_config.default_timeout,
+        webdriver_config.headless_flag
+    );
     await puppeteer_service.init();
 
     const db_service = new DBService("./app/pokernow-gpt.db");
@@ -39,13 +38,28 @@ const bot_manager = async function() {
     const log_service = new LogService(game_id);
     await log_service.init();
 
-    const ai_service_factory = new AIServiceFactory();
-    ai_service_factory.printSupportedModels();
-    const ai_service = ai_service_factory.createAIService(ai_config.provider, ai_config.model_name, ai_config.playstyle);
-    console.log(`Created AI service: ${ai_config.provider} ${ai_config.model_name} with playstyle: ${ai_config.playstyle}`);
-    ai_service.init();
+    // Create AI service (optional — used as second opinion on borderline folds)
+    let ai_service = null;
+    try {
+        const factory = new AIServiceFactory();
+        ai_service = factory.createAIService(
+            ai_config.provider, ai_config.model_name, ai_config.playstyle
+        );
+        ai_service.init();
+        console.log(`[Bot] AI connected — ${ai_config.provider}/${ai_config.model_name} (${ai_config.playstyle})`);
+    } catch (err) {
+        console.warn("[Bot] AI service unavailable — running on local engine only.", (err as Error).message);
+    }
 
-    const bot = new Bot(log_service, ai_service, player_service, puppeteer_service, game_id, bot_config.debug_mode, bot_config.query_retries);
+    const bot = new Bot(
+        log_service,
+        player_service,
+        puppeteer_service,
+        game_id,
+        bot_config.debug_mode,
+        ai_service
+    );
+
     await bot.run();
 }
 
