@@ -57,7 +57,8 @@ const bot_manager = async function() {
         puppeteer_service,
         game_id,
         bot_config.debug_mode,
-        ai_service
+        ai_service,
+        ai_config.algorithm ?? null
     );
 
     await bot.run();

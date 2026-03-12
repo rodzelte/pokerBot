@@ -1,5 +1,45 @@
 {
   "provider": "RLCard",
   "model_name": "dqn",
-  "playstyle": "neutral"
+  "playstyle": "neutral",
+  "algorithm": {
+    "selection_mode": "cascade",
+    "primary": "dqn",
+    "algorithms": ["dqn", "nfsp"],
+    "cascade_min_confidence": 0.55,
+    "ensemble_weights": [0.55, 0.45],
+    "params": {
+      "cfr": {
+        "game": "limit-holdem",
+        "model_path": "./python/models/cfr"
+      },
+      "cfr_plus": {
+        "game": "limit-holdem",
+        "model_path": "./python/models/cfr_plus"
+      },
+      "mccfr": {
+        "game": "limit-holdem",
+        "model_path": "./python/models/mccfr"
+      },
+      "deep_cfr": {
+        "game": "no-limit-holdem",
+        "model_path": "./python/models/deep_cfr",
+        "device": "auto"
+      },
+      "dqn": {
+        "epsilon": 0,
+        "mlp_layers": [256, 256, 128],
+        "model_path": "./python/models/dqn/checkpoint.pt",
+        "device": "auto"
+      },
+      "nfsp": {
+        "anticipatory_param": 0.1,
+        "hidden_layers": [256, 256, 128],
+        "q_mlp_layers": [256, 256, 128],
+        "evaluate_with": "average_policy",
+        "model_path": "./python/models/nfsp/checkpoint.pt",
+        "device": "auto"
+      }
+    }
+  }
 }

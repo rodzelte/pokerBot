@@ -676,4 +676,315 @@ export class PuppeteerService {
             };
         }
     }
+
+    /**
+     * Scrape all player stacks from the DOM.
+     * Returns an array of { seat, name, stack } for each seated player.
+     * This provides the full table state needed by the AI agent integration.
+     */
+    async getAllPlayerStacks<D, E=Error>(): Response<D, E> {
+        try {
+            const players = await this.page.evaluate(() => {
+                const result: { seat: number; name: string; stack: number }[] = [];
+                const divs = (globalThis as any).document.querySelectorAll(
+                    ".table-player"
+                );
+                for (const div of divs) {
+                    // Skip empty seats
+                    if (div.classList.contains("table-player-seat")) continue;
+                    const status = div.querySelector(".table-player-status-icon");
+                    if (status) {
+                        const statusText = status.textContent ?? "";
+                        if (/standing.up|away/i.test(statusText)) continue;
+                    }
+
+                    const seatMatch = div.className.match(/table-player-(\d+)/);
+                    const nameEl = div.querySelector(".table-player-name span");
+                    const stackEl = div.querySelector(".table-player-stack");
+
+                    if (seatMatch && nameEl) {
+                        const stackText = stackEl?.textContent?.replace(/[^0-9.]/g, "") ?? "0";
+                        result.push({
+                            seat: parseInt(seatMatch[1], 10),
+                            name: (nameEl.textContent ?? "").trim(),
+                            stack: parseFloat(stackText) || 0,
+                        });
+                    }
+                }
+                return result.sort((a: any, b: any) => a.seat - b.seat);
+            });
+
+            return {
+                code: "success",
+                data: players as D,
+                msg: `Scraped stacks for ${(players as any[]).length} player(s).`
+            };
+        } catch (err) {
+            return {
+                code: "error",
+                error: new Error("Failed to scrape player stacks.") as E
+            };
+        }
+    }
+
+    /**
+     * Detect the bot's table position (BU, SB, BB, UTG, etc.)
+     * by reading occupied seats and the dealer button from the DOM.
+     *
+     * Position labels match Table.getPositionLabels() so the whole
+     * pipeline (engine, rlcard, LLM) sees the same strings.
+     */
+    async getMySeatPosition<D, E=Error>(myName: string): Response<D, E> {
+        try {
+            const position = await this.page.evaluate((name: string) => {
+                const doc = (globalThis as any).document;
+                const allPlayerDivs = [...doc.querySelectorAll('.table-player')] as any[];
+
+                const getSeatNum = (div: any): number | null => {
+                    const match = [...div.classList].find((c: string) =>
+                        /^table-player-\d+$/.test(c)
+                    );
+                    return match ? parseInt(match.split('-').pop()!) : null;
+                };
+
+                // Occupied seats = those with a player name link
+                const occupiedSeats = allPlayerDivs.filter((div: any) =>
+                    div.querySelector('.table-player-name a') !== null
+                );
+                if (occupiedSeats.length === 0) return null;
+
+                // Find hero's seat
+                const mySeatDiv = occupiedSeats.find((div: any) => {
+                    const nameLink = div.querySelector('.table-player-name a');
+                    return nameLink && nameLink.textContent.trim() === name;
+                });
+                if (!mySeatDiv) return null;
+
+                const mySeatNumber = getSeatNum(mySeatDiv);
+                const occupiedSeatNumbers = occupiedSeats
+                    .map(getSeatNum)
+                    .filter((n: number | null): n is number => n !== null)
+                    .sort((a: number, b: number) => a - b);
+
+                const totalPlayers = occupiedSeatNumbers.length;
+                if (totalPlayers === 0 || mySeatNumber === null) return null;
+
+                // ── Detect dealer button seat ──
+                let buttonSeatNumber: number | null = null;
+
+                // Strategy 1: .dealer-button-ctn inside a table-player
+                const dealerCtn = doc.querySelector('.dealer-button-ctn');
+                if (dealerCtn) {
+                    const parent = dealerCtn.closest("[class*='table-player-']");
+                    if (parent) {
+                        const m = parent.className.match(/table-player-(\d+)/);
+                        if (m) buttonSeatNumber = parseInt(m[1], 10);
+                    }
+                }
+
+                // Strategy 2: .dealer class on a table-player
+                if (buttonSeatNumber === null) {
+                    const dealerPlayer = doc.querySelector(
+                        '.table-player.dealer, .table-player .dealer-button'
+                    );
+                    if (dealerPlayer) {
+                        const el = dealerPlayer.closest("[class*='table-player-']");
+                        if (el) {
+                            const m = el.className.match(/table-player-(\d+)/);
+                            if (m) buttonSeatNumber = parseInt(m[1], 10);
+                        }
+                    }
+                }
+
+                // Strategy 3: any element with "dealer" in its class
+                if (buttonSeatNumber === null) {
+                    const anyDealer = doc.querySelector('[class*="dealer"]');
+                    if (anyDealer) {
+                        const tp = anyDealer.closest('.table-player');
+                        if (tp) {
+                            const m = tp.className.match(/table-player-(\d+)/);
+                            if (m) buttonSeatNumber = parseInt(m[1], 10);
+                        }
+                    }
+                }
+
+                // Last resort: first occupied seat
+                if (buttonSeatNumber === null) {
+                    buttonSeatNumber = occupiedSeatNumbers[0];
+                }
+
+                const buttonIndex = occupiedSeatNumbers.indexOf(buttonSeatNumber);
+                if (buttonIndex === -1) return null;
+
+                // Reorder seats clockwise starting from the button
+                const orderedSeats: number[] = [];
+                for (let i = 0; i < totalPlayers; i++) {
+                    orderedSeats.push(
+                        occupiedSeatNumbers[(buttonIndex + i) % totalPlayers]
+                    );
+                }
+
+                // Position labels — must match Table.getPositionLabels()
+                const LABELS: Record<number, string[]> = {
+                    2:  ["SB", "BB"],
+                    3:  ["BU", "SB", "BB"],
+                    4:  ["BU", "SB", "BB", "UTG"],
+                    5:  ["BU", "SB", "BB", "UTG", "CO"],
+                    6:  ["BU", "SB", "BB", "UTG", "HJ", "CO"],
+                    7:  ["BU", "SB", "BB", "UTG", "MP", "HJ", "CO"],
+                    8:  ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "HJ", "CO"],
+                    9:  ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "LJ", "HJ", "CO"],
+                    10: ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "MP", "LJ", "HJ", "CO"],
+                };
+                const positions = LABELS[totalPlayers] ?? LABELS[10]!;
+
+                const myIndex = orderedSeats.indexOf(mySeatNumber);
+                return myIndex >= 0 ? positions[myIndex % positions.length] : null;
+            }, myName);
+
+            if (position) {
+                console.log(`[Puppeteer] Bot seat position: ${position}`);
+                return {
+                    code: "success",
+                    data: position as D,
+                    msg: `Bot is in position ${position}.`
+                };
+            }
+
+            return {
+                code: "error",
+                error: new Error("Could not determine seat position.") as E
+            };
+        } catch (err) {
+            return {
+                code: "error",
+                error: new Error("Failed to detect seat position.") as E
+            };
+        }
+    }
+
+    /**
+     * Scrape ALL player positions from the DOM in one call.
+     * Returns an array of { seat, name, position } sorted clockwise from dealer.
+     * This is the single source of truth for position assignment.
+     */
+    async getAllPlayerPositions<D, E=Error>(): Response<D, E> {
+        try {
+            const result = await this.page.evaluate(() => {
+                const doc = (globalThis as any).document;
+                const allPlayerDivs = [...doc.querySelectorAll('.table-player')] as any[];
+
+                const getSeatNum = (div: any): number | null => {
+                    const match = [...div.classList].find((c: string) =>
+                        /^table-player-\d+$/.test(c)
+                    );
+                    return match ? parseInt(match.split('-').pop()!) : null;
+                };
+
+                // Occupied seats = those with a player name
+                const occupiedSeats = allPlayerDivs.filter((div: any) =>
+                    div.querySelector('.table-player-name a') !== null
+                );
+                if (occupiedSeats.length === 0) return null;
+
+                const seatData: { seat: number; name: string }[] = [];
+                for (const div of occupiedSeats) {
+                    const seat = getSeatNum(div);
+                    const nameEl = div.querySelector('.table-player-name a');
+                    const name = nameEl ? nameEl.textContent.trim() : "";
+                    if (seat !== null && name) seatData.push({ seat, name });
+                }
+                seatData.sort((a: any, b: any) => a.seat - b.seat);
+
+                const seatNumbers = seatData.map((s: any) => s.seat);
+                const totalPlayers = seatNumbers.length;
+                if (totalPlayers === 0) return null;
+
+                // ── Detect dealer button seat ──
+                let buttonSeat: number | null = null;
+
+                const dealerCtn = doc.querySelector('.dealer-button-ctn');
+                if (dealerCtn) {
+                    const parent = dealerCtn.closest("[class*='table-player-']");
+                    if (parent) {
+                        const m = parent.className.match(/table-player-(\d+)/);
+                        if (m) buttonSeat = parseInt(m[1], 10);
+                    }
+                }
+                if (buttonSeat === null) {
+                    const dp = doc.querySelector(
+                        '.table-player.dealer, .table-player .dealer-button'
+                    );
+                    if (dp) {
+                        const el = dp.closest("[class*='table-player-']");
+                        if (el) {
+                            const m = el.className.match(/table-player-(\d+)/);
+                            if (m) buttonSeat = parseInt(m[1], 10);
+                        }
+                    }
+                }
+                if (buttonSeat === null) {
+                    const anyDealer = doc.querySelector('[class*="dealer"]');
+                    if (anyDealer) {
+                        const tp = anyDealer.closest('.table-player');
+                        if (tp) {
+                            const m = tp.className.match(/table-player-(\d+)/);
+                            if (m) buttonSeat = parseInt(m[1], 10);
+                        }
+                    }
+                }
+                if (buttonSeat === null) buttonSeat = seatNumbers[0];
+
+                const btnIdx = seatNumbers.indexOf(buttonSeat);
+                if (btnIdx === -1) return null;
+
+                // Reorder clockwise from dealer
+                const ordered: { seat: number; name: string }[] = [];
+                for (let i = 0; i < totalPlayers; i++) {
+                    ordered.push(seatData[(btnIdx + i) % totalPlayers]);
+                }
+
+                const LABELS: Record<number, string[]> = {
+                    2:  ["SB", "BB"],
+                    3:  ["BU", "SB", "BB"],
+                    4:  ["BU", "SB", "BB", "UTG"],
+                    5:  ["BU", "SB", "BB", "UTG", "CO"],
+                    6:  ["BU", "SB", "BB", "UTG", "HJ", "CO"],
+                    7:  ["BU", "SB", "BB", "UTG", "MP", "HJ", "CO"],
+                    8:  ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "HJ", "CO"],
+                    9:  ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "LJ", "HJ", "CO"],
+                    10: ["BU", "SB", "BB", "UTG", "UTG+1", "MP", "MP", "LJ", "HJ", "CO"],
+                };
+                const positions = LABELS[totalPlayers] ?? LABELS[10]!;
+
+                return ordered.map((p: any, i: number) => ({
+                    seat: p.seat,
+                    name: p.name,
+                    position: positions[i % positions.length],
+                }));
+            });
+
+            if (result && (result as any[]).length > 0) {
+                console.log(
+                    `[Puppeteer] All positions: ` +
+                    (result as any[]).map((p: any) => `${p.name}=${p.position}`).join(", ")
+                );
+                return {
+                    code: "success",
+                    data: result as D,
+                    msg: `Scraped positions for ${(result as any[]).length} player(s).`
+                };
+            }
+
+            return {
+                code: "error",
+                error: new Error("Could not determine player positions.") as E
+            };
+        } catch (err) {
+            return {
+                code: "error",
+                error: new Error("Failed to scrape player positions from DOM.") as E
+            };
+        }
+    }
 }

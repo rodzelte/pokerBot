@@ -1,14 +1,18 @@
 """
-train_dqn.py — Train rlcard's DQN agent for No-Limit Hold'em.
+train_nfsp.py — Train rlcard's NFSP (Neural Fictitious Self-Play) agent for No-Limit Hold'em.
+
+NFSP learns by combining reinforcement learning with supervised learning on its
+own average strategy, converging towards a Nash equilibrium in imperfect-information games.
 
 Usage:
-  python train_dqn.py                          # 50k episodes, saves to ./models/
-  python train_dqn.py --episodes 200000        # more episodes for better play
-  python train_dqn.py --resume ./models/dqn    # resume from checkpoint
-  python train_dqn.py --self-play              # enable self-play + opponent pool
+  python train_nfsp.py                          # 50k episodes, saves to ./models/nfsp/
+  python train_nfsp.py --episodes 200000        # more episodes for better play
+  python train_nfsp.py --resume ./models/nfsp   # resume from checkpoint
+  python train_nfsp.py --self-play              # enable self-play + opponent pool
 
-The trained model is saved to ./models/dqn/ and can be loaded by the server:
-  set RLCARD_MODEL_PATH=./models/dqn/checkpoint.pt
+The trained model is saved to ./models/nfsp/ and can be loaded by the server:
+  set RLCARD_MODEL_PATH=./models/nfsp/checkpoint.pt
+  set RLCARD_AGENT_TYPE=nfsp
   python rlcard_server.py
 """
 import argparse
@@ -19,7 +23,7 @@ import time
 
 import torch
 import rlcard
-from rlcard.agents import DQNAgent, RandomAgent
+from rlcard.agents import NFSPAgent, RandomAgent
 from rlcard.utils import (
     set_seed,
     tournament,
@@ -37,7 +41,7 @@ from opponents import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-log = logging.getLogger("train")
+log = logging.getLogger("train_nfsp")
 
 
 def resolve_device(device_name: str) -> torch.device:
@@ -70,26 +74,34 @@ def log_device_info(device: torch.device) -> None:
     log.info(f"Torch threads: intraop={torch.get_num_threads()}")
 
 
-def save_checkpoint(agent: DQNAgent, checkpoint_path: str, episode: int, agent_config: dict) -> None:
-    """Persist model weights and training metadata."""
+def save_checkpoint(agent: NFSPAgent, checkpoint_path: str, episode: int, agent_config: dict) -> None:
+    """Persist model weights and training metadata for NFSP."""
     torch.save({
-        "q_net": agent.q_estimator.qnet.state_dict(),
-        "target_net": agent.target_estimator.qnet.state_dict(),
-        "total_t": agent.total_t,
+        # RL (best response) network
+        "q_net": agent._rl_agent.q_estimator.qnet.state_dict(),
+        "target_net": agent._rl_agent.target_estimator.qnet.state_dict(),
+        # Average policy (supervised learning) network
+        "avg_net": agent.policy_network.state_dict(),
+        "total_t": agent._rl_agent.total_t,
         "episode": episode,
+        "agent_type": "nfsp",
         "agent_config": agent_config,
     }, checkpoint_path)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train rlcard DQN agent for NL Hold'em")
+    parser = argparse.ArgumentParser(description="Train rlcard NFSP agent for NL Hold'em")
     parser.add_argument("--episodes", type=int, default=50000, help="Number of training episodes")
     parser.add_argument("--eval-every", type=int, default=10000, help="Evaluate every N episodes")
     parser.add_argument("--eval-num", type=int, default=1000, help="Number of evaluation games")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save-dir", type=str, default="./models/dqn")
+    parser.add_argument("--save-dir", type=str, default="./models/nfsp")
     parser.add_argument("--resume", type=str, default="", help="Path to checkpoint to resume from")
-    parser.add_argument("--lr", type=float, default=0.0005, help="Learning rate")
+    parser.add_argument("--rl-lr", type=float, default=0.0005, help="RL (best response) learning rate")
+    parser.add_argument("--sl-lr", type=float, default=0.001, help="Supervised learning (avg policy) learning rate")
+    parser.add_argument("--anticipatory-param", type=float, default=0.1,
+                        help="Anticipatory parameter η: probability of using best-response policy. "
+                             "Lower values -> more average strategy (closer to Nash). Range [0, 1].")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
                         help="Training device. 'auto' uses CUDA when available.")
     parser.add_argument("--cpu-threads", type=int, default=0,
@@ -136,42 +148,44 @@ def main():
         "seed": args.seed + 1,
     })
 
-    # Agent config for save/restore
+    # NFSP agent config
     agent_config = dict(
         num_actions=env.num_actions,
         state_shape=env.state_shape[0],
-        mlp_layers=[256, 256, 128],
+        hidden_layers_sizes=[256, 256, 128],
+        q_mlp_layers=[256, 256, 128],
         device=device,
-        learning_rate=args.lr,
-        replay_memory_size=50000,
+        anticipatory_param=args.anticipatory_param,
+        rl_learning_rate=args.rl_lr,
+        sl_learning_rate=args.sl_lr,
+        reservoir_buffer_capacity=100000,
+        q_replay_memory_size=50000,
         batch_size=64,
-        update_target_estimator_every=2000,
-        epsilon_decay_steps=30000,
-        epsilon_start=1.0,
-        epsilon_end=0.05,
+        min_buffer_size_to_learn=256,
+        evaluate_with="average_policy",
     )
 
-    # Create DQN agent — auto-resume from checkpoint if it exists
+    # Create NFSP agent
     checkpoint_path = os.path.join(args.save_dir, "checkpoint.pt")
     resume_path = args.resume or args.save_dir
     resume_ckpt = os.path.join(resume_path, "checkpoint.pt")
     start_episode = 1
 
-    agent = DQNAgent(**agent_config)
+    agent = NFSPAgent(**agent_config)
 
     if os.path.exists(resume_ckpt):
         log.info(f"Found checkpoint: {resume_ckpt} — resuming...")
         ckpt = torch.load(resume_ckpt, map_location=device, weights_only=False)
-        agent.q_estimator.qnet.load_state_dict(ckpt["q_net"])
-        agent.target_estimator.qnet.load_state_dict(ckpt["target_net"])
 
-        # Replay memory is NOT saved, so reset total_t to 0 to let the
-        # buffer warm up again before training resumes.  The model weights
-        # are the important part — training quality is unaffected.
-        agent.total_t = 0
+        # Load RL network
+        agent._rl_agent.q_estimator.qnet.load_state_dict(ckpt["q_net"])
+        agent._rl_agent.target_estimator.qnet.load_state_dict(ckpt["target_net"])
+        # Load average policy network
+        if "avg_net" in ckpt:
+            agent.policy_network.load_state_dict(ckpt["avg_net"])
 
-        # Recover episode count: prefer checkpoint value, fall back to
-        # the last entry in performance.csv if the checkpoint is old-format.
+        agent._rl_agent.total_t = 0  # Reset for buffer warm-up
+
         saved_episode = ckpt.get("episode", 0)
         if saved_episode == 0:
             perf_csv = os.path.join(args.save_dir, "performance.csv")
@@ -187,7 +201,7 @@ def main():
             log.info("Training already complete!")
             return
     else:
-        log.info("No checkpoint found — starting fresh.")
+        log.info("No checkpoint found — starting fresh NFSP training.")
 
     # Random opponent for training
     random_agent = RandomAgent(num_actions=env.num_actions)
@@ -243,9 +257,11 @@ def main():
 
     os.makedirs(args.save_dir, exist_ok=True)
 
-    log.info(f"Training episodes {start_episode} to {args.episodes}...")
+    log.info(f"Training NFSP episodes {start_episode} to {args.episodes}...")
+    log.info(f"Anticipatory param η={args.anticipatory_param} "
+             f"(lower -> closer to Nash equilibrium)")
 
-    # Graceful shutdown on Ctrl+C — saves checkpoint before exiting
+    # Graceful shutdown on Ctrl+C
     _shutdown_requested = False
     _current_episode = start_episode
 
@@ -262,7 +278,7 @@ def main():
 
     signal.signal(signal.SIGINT, _handle_interrupt)
 
-    # Append to performance log instead of overwriting
+    # Performance log
     perf_path = os.path.join(args.save_dir, "performance.csv")
     write_header = not os.path.exists(perf_path) or os.path.getsize(perf_path) == 0
 
@@ -287,7 +303,7 @@ def main():
                 opponent, opp_name = opponent_pool.sample(weights)
                 env.set_agents([train_hero, opponent])
 
-            # Generate training data by playing one game
+            # Generate training data
             trajectories, payoffs = env.run(is_training=True)
 
             # Update stack tracker and get metrics for reward shaping
@@ -298,10 +314,8 @@ def main():
             # Apply reward shaping (with stack-aware signals if enabled)
             shaped_payoffs = reward_shaper.shape(payoffs, trajectories, stack_metrics=stack_metrics)
 
-            # Reorganize raw trajectories into (state, action, reward, next_state, done) tuples
             trajectories = reorganize(trajectories, shaped_payoffs)
 
-            # Feed transitions to the agent
             for ts in trajectories[0]:
                 agent.feed(ts)
 
@@ -310,7 +324,7 @@ def main():
                 if curriculum and curriculum.should_snapshot(episode, snap_interval):
                     opponent_pool.add_snapshot(agent, name=f"snap-{episode}")
 
-            # Check for manual save trigger (create a "SAVE" file in save dir)
+            # Manual save trigger
             trigger_path = os.path.join(args.save_dir, "SAVE")
             if os.path.exists(trigger_path):
                 os.remove(trigger_path)
@@ -324,7 +338,7 @@ def main():
                 pct = episode / args.episodes * 100
                 remaining = (args.episodes - episode) / max(eps_per_sec, 0.01)
                 log.info(
-                    f"[DQN] {episode}/{args.episodes} ({pct:.1f}%) | "
+                    f"[NFSP] {episode}/{args.episodes} ({pct:.1f}%) | "
                     f"Speed: {eps_per_sec:.1f} eps/s | "
                     f"Elapsed: {total_elapsed / 60:.1f} min | "
                     f"ETA: {remaining / 60:.1f} min"
@@ -355,22 +369,22 @@ def main():
                 perf_file.flush()
 
                 log.info(
-                    f"[DQN] Checkpoint {episode}/{args.episodes} ({pct:.1f}%) | "
+                    f"[NFSP] Checkpoint {episode}/{args.episodes} ({pct:.1f}%) | "
                     f"Eval reward: {reward:.4f}{stack_info} | "
                     f"Phase: {phase} | Pool: {pool_size}{noise_info}"
                 )
                 if stack_tracker:
-                    log.info(f"[DQN] Training bankroll: {stack_tracker.summary()}")
+                    log.info(f"[NFSP] Training bankroll: {stack_tracker.summary()}")
                 save_checkpoint(agent, checkpoint_path, episode, agent_config)
-                log.info(f"[DQN] Saved -> {checkpoint_path}")
+                log.info(f"[NFSP] Saved -> {checkpoint_path}")
 
         if args.episodes % args.eval_every != 0:
             save_checkpoint(agent, checkpoint_path, args.episodes, agent_config)
             log.info(f"Final checkpoint saved to {checkpoint_path} (episode {args.episodes})")
 
-    log.info("Training complete!")
+    log.info("NFSP Training complete!")
     log.info(f"Model saved to {checkpoint_path}")
-    log.info(f"To use: set RLCARD_MODEL_PATH={checkpoint_path}")
+    log.info(f"To use: set RLCARD_MODEL_PATH={checkpoint_path} & set RLCARD_AGENT_TYPE=nfsp")
 
 
 if __name__ == "__main__":

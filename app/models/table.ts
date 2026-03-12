@@ -195,6 +195,9 @@ export class Table {
         }
         throw new Error(`Could not retrieve position for player with id: ${player_id}.`);
     }
+    public setPlayerPosition(player_id: string, position: string): void {
+        this.id_to_position.set(player_id, position);
+    }
     
     public setIdToPosition(first_seat = 1): void {
         const visited = new Set<number>();

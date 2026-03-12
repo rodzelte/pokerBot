@@ -27,7 +27,11 @@
     <li>
       <a href="#rlcard-ai-python">RLCard AI (Python)</a>
       <ul>
-        <li><a href="#training-the-dqn-agent">Training</a></li>
+        <li><a href="#training">Training</a></li>
+        <li><a href="#unified-training-cli">Unified Training CLI</a></li>
+        <li><a href="#self-play--opponent-pool">Self-Play & Opponent Pool</a></li>
+        <li><a href="#exploration-noise-realistic-play">Exploration Noise (Realistic Play)</a></li>
+        <li><a href="#stack-aware-rewards-bb-equity">Stack-Aware Rewards (BB Equity)</a></li>
         <li><a href="#running-the-rlcard-server">Running the Server</a></li>
         <li><a href="#decision-pipeline">Decision Pipeline</a></li>
       </ul>
@@ -81,7 +85,7 @@ As ChatGPT and LLMs/generative models as a whole improve over time, we can and s
 1. Get an Open AI API Key at [(https://platform.openai.com/docs/overview)](https://platform.openai.com/docs/overview)
 2. Clone the repo
    ```sh
-   git clone https://github.com/csong2022/pokernow-gpt.git
+   git clone https://github.com/rodzelte/pokerBot
    ```
 3. Install NPM packages
    ```sh
@@ -121,51 +125,162 @@ Google: "gemini-1.5-flash", "gemini-1.0-pro", "gemini-1.5-pro"
 <!-- RLCARD AI -->
 ## RLCard AI (Python)
 
-The bot includes an RL-based poker AI powered by [rlcard](https://github.com/datamllab/rlcard). A Python FastAPI server wraps a trained DQN agent and serves decisions to the TypeScript bot over HTTP.
+The bot includes an RL-based poker AI powered by [rlcard](https://github.com/datamllab/rlcard). A Python FastAPI server wraps a trained agent (DQN, NFSP, or CFR) and serves decisions to the TypeScript bot over HTTP.
 
 ### Requirements
 
-- Python 3.10–3.12 (CUDA PyTorch wheels are not available for 3.13+)
+- Python 3.10+
 - pip
+- NVIDIA GPU and matching CUDA-enabled PyTorch build if you want GPU training
 
 ### Setup
 
 1. Install Python dependencies
    ```sh
    cd python
-   pip install rlcard torch fastapi uvicorn
+   python -m pip install -r requirements.txt
    ```
 
 2. *(Optional — for GPU training)* Install the CUDA build of PyTorch instead
    ```sh
-   pip install torch --index-url https://download.pytorch.org/whl/cu124
+   python -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu124
    ```
 
-### Training the DQN Agent
+3. Verify whether PyTorch can see your GPU
+   ```sh
+   python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
+   ```
 
-Train a DQN agent from scratch or resume from an existing checkpoint:
+### Training
+
+Three algorithms are available:
+
+| Algorithm | Script | Best for |
+|-----------|--------|----------|
+| **DQN** | `train_dqn.py` | Fast training, good baseline, exploitative play |
+| **NFSP** | `train_nfsp.py` | Converges toward Nash equilibrium, balanced play |
+| **CFR** | `train_cfr.py` | Provably optimal in smaller games (Leduc, Limit) |
+
+#### Train individual algorithms
 
 ```sh
 cd python
 
-# Train for 500k episodes (auto-resumes if a checkpoint exists)
-python train_dqn.py --episodes 500000
+# DQN — fast, exploitative
+python train_dqn.py --episodes 500000 --device cuda
 
-# Customize training
-python train_dqn.py --episodes 2000000 --eval-every 5000 --lr 0.0005
+# NFSP — balanced Nash equilibrium
+python train_nfsp.py --episodes 500000 --device cuda
+
+# CFR — tabular, works best on smaller games
+python train_cfr.py --iterations 10000 --game leduc-holdem
 ```
+
+### Unified Training CLI
+
+Train one or all algorithms with a single command using `train.py`:
+
+```sh
+# Train all three sequentially
+python train.py all --episodes 1000000 --device cuda
+
+# Train specific algorithms
+python train.py dqn nfsp --episodes 500000 --device cuda
+
+# Full training suite: self-play + noise + stack rewards
+python train.py all --self-play --noise --stack-rewards --episodes 1000000 --device cuda
+```
+
+#### Common flags (DQN / NFSP)
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--episodes` | 50000 | Total training episodes |
-| `--eval-every` | 5000 | Evaluate & checkpoint every N episodes |
+| `--eval-every` | 10000 | Evaluate & checkpoint every N episodes |
 | `--eval-num` | 1000 | Number of evaluation games per checkpoint |
 | `--seed` | 42 | Random seed |
-| `--save-dir` | `./models/dqn` | Directory for checkpoints |
+| `--save-dir` | `./models/<algo>` | Directory for checkpoints |
 | `--resume` | *(auto)* | Path to checkpoint to resume from |
-| `--lr` | 0.0005 | Learning rate |
+| `--device` | `auto` | `auto`, `cpu`, or `cuda` |
+| `--log-every` | 10000 | Log training throughput every N episodes |
 
-Training progress is logged to `models/dqn/performance.csv`. Checkpoints auto-resume — if you stop and restart, it picks up where it left off.
+Checkpoints auto-resume — if you stop and restart, it picks up where it left off.
+
+### Self-Play & Opponent Pool
+
+Enable self-play to train the agent against past versions of itself instead of only random opponents. This is key to building human-competitive play.
+
+```sh
+# Self-play with opponent pool and curriculum
+python train.py dqn --self-play --episodes 1000000 --device cuda
+
+# Custom loss penalty (teaches risk aversion)
+python train.py dqn --self-play --loss-multiplier 2.0 --episodes 500000
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--self-play` | off | Enable self-play with opponent pool |
+| `--loss-multiplier` | 1.5 | Scale losses by this factor (risk aversion) |
+| `--no-reward-shaping` | off | Disable all reward shaping |
+| `--snapshot-interval` | auto | Episodes between opponent pool snapshots |
+
+The curriculum gradually shifts opponents from easy to hard:
+- **Warmup** (0-5%): 100% random — learn basic hand values
+- **Early** (5-20%): 70% random, 30% self — start counter-strategies
+- **Mid** (20-60%): 20% random, 50% self, 30% pool — diverse opponents
+- **Late** (60-100%): 10% random, 40% self, 50% pool — mostly strong opponents
+
+### Exploration Noise (Realistic Play)
+
+Add poker-aware exploration noise that biases toward aggressive/creative actions instead of meaningless random folds. This produces human-like imperfect play and diverse training data.
+
+```sh
+# Enable noise for realistic play
+python train.py dqn --noise --episodes 500000 --device cuda
+
+# Customize noise parameters
+python train.py nfsp --noise --noise-rate 0.1 --aggression-bias 0.7 --min-noise 0.02
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--noise` | off | Enable action-biased exploration |
+| `--noise-rate` | 0.08 | Initial noise rate (decays over training) |
+| `--aggression-bias` | 0.6 | When exploring, probability of aggressive action |
+| `--min-noise` | 0.02 | Minimum noise rate at end of training |
+
+Noise decays linearly from `--noise-rate` to `--min-noise` over training, so early episodes are creative and later episodes converge toward optimal.
+
+### Stack-Aware Rewards (BB Equity)
+
+Enable stack-aware reward shaping to teach the agent bankroll management. A virtual stack in big blinds (BB) carries across training hands — the more BBs the agent accumulates, the higher the reward.
+
+```sh
+# Enable stack-aware rewards
+python train.py dqn --stack-rewards --episodes 500000 --device cuda
+
+# Custom starting stack
+python train.py nfsp --stack-rewards --initial-stack-bb 200 --device cuda
+
+# Full suite: self-play + noise + stack equity
+python train.py all --self-play --noise --stack-rewards --episodes 1000000 --device cuda
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--stack-rewards` | off | Enable BB-relative stack reward shaping |
+| `--initial-stack-bb` | 100 | Starting stack in big blinds |
+
+Stack-aware signals during training:
+- **Big pot premium** — winning large pots earns extra reward (pot building)
+- **Stack growth bonus** — growing above starting stack is rewarded
+- **Deep stack bonus** — maintaining 80+ BB earns ongoing reward
+- **Short stack urgency** — wins below 30 BB get extra reward (comeback play)
+- **Stack protection** — extra loss penalty when stack is declining
+- **Win streak momentum** — consecutive wins earn bonus
+
+Evaluation also uses a stack-based tournament: the log shows profit in BB, win rate %, and peak stack reached.
 
 ### Running the RLCard Server
 
@@ -174,17 +289,36 @@ After training, start the server so the bot can query it:
 ```sh
 cd python
 
-# Uses the default checkpoint at ./models/dqn/checkpoint.pt
+# DQN (default)
 python rlcard_server.py
 
-# Or train the model
-python train_dqn.py --episodes 2000000
+# NFSP
+set RLCARD_AGENT_TYPE=nfsp
+set RLCARD_MODEL_PATH=./models/nfsp/checkpoint.pt
+python rlcard_server.py
 
+# CFR
+set RLCARD_AGENT_TYPE=cfr
+set RLCARD_MODEL_PATH=./models/cfr/cfr_model.pkl
+python rlcard_server.py
 
-# Or specify a custom model path
-set RLCARD_MODEL_PATH=./models/dqn/checkpoint.pt
+# Custom device
+set RLCARD_DEVICE=cuda
 python rlcard_server.py
 ```
+
+#### All flags at once (Recommended by developer)
+
+```sh
+python train.py all --self-play --noise --stack-rewards --episodes 1000000 --device cuda --loss-multiplier 2.0 --noise-rate 0.12 --aggression-bias 0.65 --min-noise 0.03 --initial-stack-bb 100 --rebuy-penalty 0.3 --eval-every 10000 --eval-num 1000 --log-every 10000 --seed 42
+```
+
+| Env Variable | Default | Description |
+|-------------|---------|-------------|
+| `RLCARD_AGENT_TYPE` | `dqn` | Agent type: `dqn`, `nfsp`, or `cfr` |
+| `RLCARD_MODEL_PATH` | `./models/dqn/checkpoint.pt` | Path to trained model |
+| `RLCARD_DEVICE` | `cpu` | Inference device |
+| `RLCARD_PORT` | `5050` | Server port |
 
 The server listens on `http://127.0.0.1:5050`. The bot automatically connects to it on startup — if the server is not running, the bot falls back to the local engine and LLM.
 

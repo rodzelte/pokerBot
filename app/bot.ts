@@ -7,6 +7,15 @@ import { LocalPokerEngine } from "./services/local-poker-engine.ts";
 import { AIMessage, AIService, BotAction, defaultCheckAction, defaultFoldAction } from './interfaces/ai-client-interfaces.ts';
 import { ProcessedLogs } from './interfaces/log-processing-interfaces.ts';
 import { constructQuery } from './helpers/construct-query-helper.ts';
+import type {
+    GameStateSnapshot,
+    PlayerInfo,
+    ActionRecord,
+    PokerStreet,
+    AlgorithmType,
+    EnsembleConfig,
+} from './interfaces/game-state-interfaces.ts';
+import type { AlgorithmConfig } from './interfaces/config-interfaces.ts';
 
 import { Game } from './models/game.ts';
 import { Table } from './models/table.ts';
@@ -60,6 +69,11 @@ export class Bot {
     private readonly equityEstimator = new EquityEstimator();
     private readonly handEvaluator = new HandEvaluator();
 
+    /** Algorithm selection/ensemble configuration */
+    private readonly algorithmConfig: AlgorithmConfig | null;
+    /** Hand counter for unique hand IDs */
+    private handCounter = 0;
+
     private first_created: string;
 
     private table!: Table;
@@ -72,7 +86,8 @@ export class Bot {
         puppeteer_service: PuppeteerService,
         game_id: string,
         debug_mode: DebugMode,
-        ai_service: AIService | null = null
+        ai_service: AIService | null = null,
+        algorithmConfig: AlgorithmConfig | null = null
     ) {
         this.log_service = log_service;
         this.player_service = player_service;
@@ -82,6 +97,7 @@ export class Bot {
         this.game_id = game_id;
         this.debug_mode = debug_mode;
         this.aiService = ai_service;
+        this.algorithmConfig = algorithmConfig;
         this.rlcardService = new RLCardService();
         this.rlcardService.init();
 
@@ -95,6 +111,24 @@ export class Bot {
         this.rlcardAvailable = await this.rlcardService.isHealthy();
         if (this.rlcardAvailable) {
             console.log("[RLCard] Python server connected — rlcard advisor enabled.");
+            const agentType = this.rlcardService.getAgentType();
+            const available = this.rlcardService.getAvailableAgents();
+            console.log(`[RLCard] Active agent: ${agentType}`);
+            if (available.length > 0) {
+                console.log(`[RLCard] Available agents: ${available.join(", ")}`);
+            }
+            // Log algorithm configuration
+            if (this.algorithmConfig) {
+                console.log(`[Algorithm] Mode: ${this.algorithmConfig.selection_mode}`);
+                console.log(`[Algorithm] Primary: ${this.algorithmConfig.primary}`);
+                console.log(`[Algorithm] Algorithms: ${this.algorithmConfig.algorithms.join(", ")}`);
+                if (this.algorithmConfig.selection_mode === "ensemble" && this.algorithmConfig.ensemble_weights) {
+                    console.log(`[Algorithm] Ensemble weights: ${this.algorithmConfig.ensemble_weights.join(", ")}`);
+                }
+                if (this.algorithmConfig.selection_mode === "cascade" && this.algorithmConfig.cascade_min_confidence) {
+                    console.log(`[Algorithm] Cascade min confidence: ${(this.algorithmConfig.cascade_min_confidence * 100).toFixed(0)}%`);
+                }
+            }
         } else {
             console.log("[RLCard] Python server not available — running without rlcard.");
             console.log("[RLCard] To enable: cd python && pip install -r requirements.txt && python rlcard_server.py");
